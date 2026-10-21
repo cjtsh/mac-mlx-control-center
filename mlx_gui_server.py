@@ -159,6 +159,15 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             repo_ids = [i.strip() for i in ids.split(",") if i.strip()][:80]
             sizes = mlx_helper.get_repo_sizes_bulk(repo_ids) if repo_ids else {}
             self.send_json({"sizes": sizes})
+        elif path == "/api/drives":
+            force = query.get("force", ["0"])[0].lower() in ("1", "true", "yes")
+            drives = mlx_helper.list_storage_drives(force=force)
+            default = mlx_helper.get_default_drive(drives)
+            self.send_json({
+                "drives": drives,
+                "default": (default or {}).get("id", ""),
+                "default_name": (default or {}).get("name", ""),
+            })
         elif path == "/api/logs":
             log_files = []
             if os.path.exists(LOG_DIR):
@@ -221,6 +230,16 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             
             mlx_helper.save_global_settings(st)
             self.send_json({"status": "ok", "config": st})
+
+        elif path == "/api/drives/default":
+            target = (payload.get("drive") or "").strip()
+            chosen = mlx_helper.set_default_drive(target)
+            self.send_json({
+                "status": "ok",
+                "default": (chosen or {}).get("id", ""),
+                "default_name": (chosen or {}).get("name", ""),
+                "drives": mlx_helper.list_storage_drives(force=True),
+            })
 
         elif path == "/api/start":
             st = mlx_helper.load_global_settings()
@@ -480,7 +499,9 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                     mlx_helper.save_paused_downloads(paused)
 
                 env = mlx_helper.get_mlx_env()
-                cmd = mlx_helper.get_download_cmd(repo_id, subfolder=subfolder, revision=revision)
+                hub, drive = mlx_helper.ensure_library_hub(payload.get("drive") or None)
+                cmd = mlx_helper.get_download_cmd(repo_id, subfolder=subfolder, revision=revision,
+                                                 cache_dir=hub if drive and drive.get("connected") else "")
 
                 proc = subprocess.Popen(cmd, env=env)
                 self.send_json({
@@ -489,6 +510,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                     "subfolder": subfolder,
                     "download_id": download_id,
                     "display_name": display_name,
+                    "drive": (drive or {}).get("name", ""),
                     "new_pid": proc.pid
                 })
             else:
@@ -505,6 +527,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
         elif path == "/api/download":
             raw_repo = payload.get("repo_id", "")
             explicit_subfolder = payload.get("subfolder", "")
+            requested_drive = (payload.get("drive") or "").strip()
             if not raw_repo:
                 self.send_json({"error": "No repo_id specified"}, 400)
                 return
@@ -516,6 +539,33 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             download_id = parsed["download_id"]
             display_name = parsed["display_name"]
 
+            hub, drive = mlx_helper.ensure_library_hub(requested_drive or None)
+            if drive and not drive.get("connected"):
+                self.send_json({
+                    "error": f"{drive.get('name', 'That drive')} is not connected",
+                    "code": "drive_disconnected",
+                    "drives": mlx_helper.list_storage_drives(force=True),
+                }, 409)
+                return
+
+            # Free-space guard: refuse to start a download that cannot fit.
+            needed_gb = 0.0
+            try:
+                total_bytes = mlx_helper.get_repo_files_size(repo_id, subfolder=subfolder)
+                if total_bytes:
+                    needed_gb = round((total_bytes / (1024 ** 3)) * 1.1, 1)
+            except Exception:
+                needed_gb = 0.0
+            if drive and needed_gb and needed_gb > float(drive.get("free_gb") or 0):
+                self.send_json({
+                    "error": (f"{drive.get('name')} has {drive.get('free_gb')} GB free but "
+                              f"{repo_id} needs about {needed_gb} GB"),
+                    "code": "insufficient_space",
+                    "needed_gb": needed_gb,
+                    "drives": mlx_helper.list_storage_drives(force=True),
+                }, 409)
+                return
+
             paused = mlx_helper.load_paused_downloads()
             if download_id in paused:
                 del paused[download_id]
@@ -525,7 +575,8 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                 mlx_helper.save_paused_downloads(paused)
 
             env = mlx_helper.get_mlx_env()
-            cmd = mlx_helper.get_download_cmd(repo_id, subfolder=subfolder, revision=revision)
+            cmd = mlx_helper.get_download_cmd(repo_id, subfolder=subfolder, revision=revision,
+                                             cache_dir=hub if drive and drive.get("connected") else "")
 
             proc = subprocess.Popen(cmd, env=env)
             self.send_json({
@@ -534,6 +585,10 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                 "subfolder": subfolder,
                 "download_id": download_id,
                 "display_name": display_name,
+                "drive": (drive or {}).get("name", ""),
+                "drive_id": (drive or {}).get("id", ""),
+                "hub": hub,
+                "needed_gb": needed_gb,
                 "pid": proc.pid
             })
 
@@ -616,7 +671,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.6 (Filters & RAM)</title>
+  <title>macOS MLX Control Center v0.7 (Multi-Drive)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1057,7 +1112,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.6 (Filters & RAM)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.7 (Multi-Drive)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
@@ -1164,6 +1219,7 @@ INDEX_HTML = """<!DOCTYPE html>
         <button class="btn btn-secondary" onclick="loadModels()">🔄 Refresh Models</button>
       </div>
     </div>
+    <div id="storageSummary" style="margin-bottom: 14px;"></div>
     <div id="modelsGrid" class="grid"></div>
   </div>
 
@@ -1223,6 +1279,12 @@ INDEX_HTML = """<!DOCTYPE html>
           <option value="128">≤ 128 GB</option>
           <option value="192">≤ 192 GB</option>
         </select>
+        <span style="font-size: 12px; color: var(--text-muted); margin-left: 4px;">Download to:</span>
+        <select id="driveSelect" onchange="onDriveChange(this.value)" title="Where new models are saved — every mounted drive is listed automatically"
+                style="padding: 6px 12px !important; font-size: 12px !important; border-color: rgba(52, 211, 153, 0.55); background: rgba(52, 211, 153, 0.12); font-weight: 600; max-width: 250px;">
+          <option value="">Loading drives…</option>
+        </select>
+        <button class="btn btn-secondary" style="padding: 6px 9px; font-size: 12px;" onclick="loadDrives(true)" title="Re-scan mounted drives">⟳</button>
         <div class="view-toggle-group">
           <button class="view-toggle-btn active" data-view="grid" onclick="setViewMode('grid')" title="Card Grid View">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 3h8v8H3V3zm10 0h8v8h-8V3zM3 13h8v8H3v-8zm10 0h8v8h-8v-8z"/></svg> Cards
@@ -1366,6 +1428,22 @@ INDEX_HTML = """<!DOCTYPE html>
       <div style="display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--card-border); padding-top: 14px;">
         <button class="btn btn-secondary" onclick="closeQuantModal()">Cancel</button>
         <button class="btn btn-warning" id="quantDownloadAllBtn">Download Full Repo (All Quantizations)</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- DRIVE PICKER MODAL -->
+  <div id="driveModal" class="modal-overlay">
+    <div class="modal" style="max-width: 620px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+        <div class="modal-header" style="margin-bottom: 0;">💾 Choose a Drive</div>
+        <button class="btn btn-secondary" style="padding: 4px 10px; font-size: 12px;" onclick="closeDriveModal()">✕ Close</button>
+      </div>
+      <div id="driveModalSubtitle" style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px; line-height: 1.5;"></div>
+      <div id="driveModalList" style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; max-height: 380px; overflow-y: auto;"></div>
+      <div style="display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--card-border); padding-top: 14px;">
+        <span id="driveModalHint" style="font-size: 11px; color: var(--text-muted);">Drives are detected automatically — plug in a new one and it appears here.</span>
+        <button class="btn btn-secondary" onclick="loadDrives(true); renderDriveModalList();">⟳ Refresh Drives</button>
       </div>
     </div>
   </div>
@@ -1649,6 +1727,118 @@ INDEX_HTML = """<!DOCTYPE html>
     let selectedForCompare = new Set();
     let globalConfig = { default_port: 9999, default_host: '127.0.0.1', default_temp: 0.0, default_max_tokens: 4096, auto_sync_agents: true };
     let currentViewMode = localStorage.getItem('mlx_view_mode') || 'grid';
+
+    // ---- Model storage: drives are discovered from the mount table, never configured ----
+    let drivesCache = [];
+    let currentDriveId = localStorage.getItem('mlx_drive') || '';
+    let pendingDownload = null;   // {repoId, subfolder} awaiting a drive choice
+
+    async function loadDrives(force = false) {
+      try {
+        const res = await fetch('/api/drives' + (force ? '?force=1' : ''));
+        const data = await res.json();
+        drivesCache = data.drives || [];
+        const usable = drivesCache.filter(d => d.connected && !d.disabled);
+        if (!currentDriveId || !usable.find(d => d.id === currentDriveId)) {
+          currentDriveId = data.default || (usable[0] ? usable[0].id : '');
+          if (currentDriveId) localStorage.setItem('mlx_drive', currentDriveId);
+        }
+        renderDriveSelect();
+        renderStorageSummary();
+        if (document.getElementById('driveModal').classList.contains('active')) renderDriveModalList();
+      } catch (e) {
+        console.warn('Could not load drives:', e);
+      }
+    }
+
+    function driveLabel(d) {
+      const icon = d.internal ? '💻' : '💾';
+      const warn = d.is_time_machine ? ' ⚠️ Time Machine' : '';
+      return `${icon} ${d.name} — ${d.free_gb} GB free${warn}`;
+    }
+
+    function renderDriveSelect() {
+      const sel = document.getElementById('driveSelect');
+      if (!sel) return;
+      const usable = drivesCache.filter(d => d.connected && !d.disabled);
+      let html = usable.map(d =>
+        `<option value="${d.id}" ${d.id === currentDriveId ? 'selected' : ''}>${driveLabel(d)}</option>`
+      ).join('');
+      html += drivesCache.filter(d => !d.connected)
+        .map(d => `<option value="${d.id}" disabled>⏏ ${d.name} — not connected</option>`).join('');
+      sel.innerHTML = html || '<option value="">No drive available</option>';
+    }
+
+    async function onDriveChange(driveId) {
+      currentDriveId = driveId;
+      localStorage.setItem('mlx_drive', driveId);
+      try {
+        await fetch('/api/drives/default', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ drive: driveId })
+        });
+      } catch (e) { console.warn(e); }
+      renderDriveSelect();
+      await loadDrives();
+    }
+
+    function renderStorageSummary() {
+      const el = document.getElementById('storageSummary');
+      if (!el) return;
+      const connected = drivesCache.filter(d => d.connected);
+      const totalModels = connected.reduce((n, d) => n + (d.models || 0), 0);
+      const off = drivesCache.filter(d => !d.connected && d.models);
+      let text = connected.map(d => `${d.internal ? '💻' : '💾'} ${d.name}: ${d.models || 0} model${(d.models || 0) === 1 ? '' : 's'} · ${d.free_gb} GB free`).join('   ');
+      if (off.length) text += `   ⏏ ${off.map(d => `${d.name} (${d.models})`).join(', ')} not connected`;
+      el.innerHTML = `<span style="font-size:12px; color: var(--text-muted);">${text || 'No drives detected'} · ${totalModels} model${totalModels === 1 ? '' : 's'} installed</span>`;
+    }
+
+    function renderDriveModalList() {
+      const list = document.getElementById('driveModalList');
+      if (!list) return;
+      const usable = drivesCache.filter(d => d.connected && !d.disabled);
+      list.innerHTML = usable.map(d => {
+        const sizeNote = pendingDownload && pendingDownload.neededGb
+          ? (d.free_gb >= pendingDownload.neededGb
+              ? `<span style="color:#34d399;">fits ${pendingDownload.neededGb} GB download</span>`
+              : `<span style="color:#f87171;">too small for ${pendingDownload.neededGb} GB</span>`)
+          : `${d.free_gb} GB free of ${d.total_gb} GB`;
+        return `
+          <div style="display:flex; justify-content:space-between; align-items:center; padding:12px 16px; border-radius:8px; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08);">
+            <div>
+              <strong style="font-size:14px;">${d.internal ? '💻' : '💾'} ${d.name}</strong>
+              <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">
+                ${d.internal ? 'Internal — keep this free if you can' : d.mount} · ${sizeNote}
+                ${d.is_time_machine ? ' · ⚠️ Time Machine destination' : ''}
+              </div>
+            </div>
+            <button class="btn btn-primary" onclick="chooseDrive('${d.id}')">Download here</button>
+          </div>`;
+      }).join('') || '<div style="color:var(--text-muted); font-size:13px;">No writable APFS/HFS+ drives detected.</div>';
+    }
+
+    function showDrivePicker(repoId, subfolder, info) {
+      pendingDownload = { repoId, subfolder, neededGb: (info && info.needed_gb) || 0 };
+      document.getElementById('driveModalSubtitle').innerHTML =
+        (info && info.error ? `<span style="color:#f87171;">${info.error}</span><br>` : '') +
+        `Choose a drive for <strong style="color:#60a5fa;">${repoId}</strong>:`;
+      document.getElementById('driveModal').classList.add('active');
+      loadDrives().then(renderDriveModalList);
+      renderDriveModalList();
+    }
+
+    function closeDriveModal() {
+      document.getElementById('driveModal').classList.remove('active');
+      pendingDownload = null;
+    }
+
+    function chooseDrive(driveId) {
+      const target = pendingDownload;
+      closeDriveModal();
+      if (target) executeDownload(target.repoId, target.subfolder, driveId);
+    }
+
 
     function setViewMode(mode) {
       currentViewMode = mode;
@@ -2238,6 +2428,7 @@ INDEX_HTML = """<!DOCTYPE html>
               </div>
               <div class="card-meta">
                 <span>📦 Size: <strong style="color: #f3f4f6;">${m.size}</strong></span>
+                ${m.drive_name ? `<span>${m.drive_id ? '💾' : '🧠'} Drive: <strong style="color: #34d399;">${m.drive_name}</strong></span>` : ''}
                 ${m.date_added ? `<span>📅 Added: <strong style="color: #f3f4f6;">${m.date_added}</strong></span>` : ''}
                 <span class="path-meta" title="${m.path}">📁 <span style="opacity: 0.85;">${m.path}</span></span>
               </div>
@@ -2498,6 +2689,8 @@ INDEX_HTML = """<!DOCTYPE html>
             </div>
             <div class="card-actions">
               <button class="btn btn-primary" onclick="downloadRepo('${r.id}')">⚡ Download</button>
+              <button class="btn btn-secondary" style="padding: 9px 12px; font-size: 12px; white-space: nowrap;" title="Choose which drive to save this model to"
+                      onclick="showDrivePicker('${r.id}', '', { needed_gb: ${r.est_ram_gb ? Math.round(r.est_ram_gb * 0.8) : 0} })">💾 Save to…</button>
               <a href="${hfUrl}" target="_blank" class="btn btn-secondary" style="padding: 9px 12px; font-size: 12px;">🔗 HF Page</a>
             </div>
           </div>`;
@@ -2733,15 +2926,44 @@ INDEX_HTML = """<!DOCTYPE html>
       document.getElementById('quantModal').classList.add('active');
     }
 
-    async function executeDownload(repoId, subfolder = '') {
-      const desc = subfolder ? `${repoId} (${subfolder})` : repoId;
-      alert(`Started downloading ${desc} via Rust Accelerated Hugging Face CLI!`);
-      await fetch('/api/download', {
+    async function executeDownload(repoId, subfolder = '', driveId = null) {
+      const targetDrive = driveId || currentDriveId || '';
+      const res = await fetch('/api/download', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repo_id: repoId, subfolder: subfolder })
+        body: JSON.stringify({ repo_id: repoId, subfolder: subfolder, drive: targetDrive })
       });
-      setTimeout(updateStatus, 1000);
+      let data = {};
+      try { data = await res.json(); } catch (e) { data = {}; }
+
+      if (res.status === 409 && (data.code === 'insufficient_space' || data.code === 'drive_disconnected')) {
+        // Let the user pick another drive instead of failing the download outright.
+        drivesCache = data.drives || drivesCache;
+        showDrivePicker(repoId, subfolder, data);
+        return;
+      }
+      if (data.error) {
+        alert(data.error);
+        return;
+      }
+      const where = data.drive ? ` → ${data.drive}` : '';
+      showToast(`Downloading ${subfolder ? repoId + ' (' + subfolder + ')' : repoId}${where}`);
+      setTimeout(updateStatus, 800);
+      setTimeout(loadDrives, 2500);
+    }
+
+    function showToast(message) {
+      let el = document.getElementById('mlxToast');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'mlxToast';
+        el.style.cssText = 'position:fixed;bottom:24px;right:24px;z-index:9999;background:rgba(17,24,39,0.96);color:#f9fafb;border:1px solid rgba(99,102,241,0.6);border-radius:10px;padding:12px 18px;font-size:13px;box-shadow:0 10px 30px rgba(0,0,0,0.45);max-width:420px;';
+        document.body.appendChild(el);
+      }
+      el.textContent = message;
+      el.style.display = 'block';
+      clearTimeout(el._timer);
+      el._timer = setTimeout(() => { el.style.display = 'none'; }, 4200);
     }
 
     async function downloadRepo(repoId, subfolder = '') {
@@ -2879,6 +3101,8 @@ INDEX_HTML = """<!DOCTYPE html>
     setInterval(updateStatus, 3000);
     updateStatus();
     loadModels();
+    loadDrives();
+    setInterval(loadDrives, 30000);
   </script>
 </body>
 </html>

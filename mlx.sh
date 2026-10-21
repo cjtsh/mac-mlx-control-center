@@ -228,6 +228,113 @@ def find_free_port(start_port=9999):
         port += 1
     return start_port
 
+# ── Storage drives (compact fallback: discovery + library layout) ────
+STORAGE_FILE = os.path.expanduser("~/.mlx_pids/storage.json")
+LIBRARY_DIRNAME = "MLX-Models"
+MIN_DRIVE_GB = 8
+
+def load_storage_config():
+    try:
+        with open(STORAGE_FILE) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def save_storage_config(cfg):
+    try:
+        os.makedirs(os.path.dirname(STORAGE_FILE), exist_ok=True)
+        tmp = STORAGE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, STORAGE_FILE)
+    except Exception:
+        pass
+
+def _vol_free_gb(path):
+    try:
+        st = os.statvfs(path)
+        return round(st.f_bavail * st.f_frsize / (1024 ** 3), 1)
+    except Exception:
+        return 0.0
+
+def list_storage_drives(force=False, include_known=True):
+    drives = []
+    mounts = [("/", "Macintosh HD")]
+    try:
+        for name in sorted(os.listdir("/Volumes")):
+            mp = os.path.join("/Volumes", name)
+            if os.path.ismount(mp):
+                mounts.append((mp, name))
+    except Exception:
+        pass
+    seen = set()
+    for mount, name in mounts:
+        probe = os.path.expanduser("~") if mount == "/" else mount
+        try:
+            if not os.access(probe, os.W_OK):
+                continue
+            st = os.statvfs(probe)
+            total_gb = st.f_blocks * st.f_frsize / (1024 ** 3)
+        except Exception:
+            continue
+        if total_gb < MIN_DRIVE_GB:
+            continue
+        key = os.path.realpath(mount)
+        if key in seen:
+            continue
+        seen.add(key)
+        internal = mount == "/"
+        library = (os.path.expanduser("~/MLX-Models") if internal else os.path.join(mount, LIBRARY_DIRNAME)) + "/hub"
+        drives.append({
+            "id": key,
+            "name": name,
+            "mount": mount,
+            "internal": internal,
+            "free_gb": _vol_free_gb(probe),
+            "total_gb": round(total_gb, 1),
+            "library": library,
+            "library_exists": os.path.isdir(library),
+            "models": len([d for d in os.listdir(library) if d.startswith("models--")]) if os.path.isdir(library) else 0,
+            "is_time_machine": False,
+            "connected": True,
+            "disabled": False,
+        })
+    cfg = load_storage_config()
+    default_id = cfg.get("default_drive", "")
+    for d in drives:
+        d["is_default"] = d["id"] == default_id
+    return sorted(drives, key=lambda d: (d["internal"], -d["free_gb"]))
+
+def get_default_drive(drives=None):
+    drives = drives if drives is not None else list_storage_drives()
+    for d in drives:
+        if d.get("is_default"):
+            return d
+    external = [d for d in drives if not d["internal"] and not d["is_time_machine"]]
+    return (external or drives or [None])[0]
+
+def set_default_drive(drive_id):
+    cfg = load_storage_config()
+    cfg["default_drive"] = drive_id
+    save_storage_config(cfg)
+
+def ensure_library_hub(drive_id=None):
+    drives = list_storage_drives()
+    target = None
+    if drive_id:
+        for d in drives:
+            if drive_id in (d["id"], d["name"], d["mount"]):
+                target = d
+                break
+    if not target:
+        target = get_default_drive(drives)
+    if not target:
+        return "", None
+    hub = target["library"]
+    os.makedirs(hub, exist_ok=True)
+    return hub, target
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "find_models":
@@ -243,6 +350,8 @@ if __name__ == "__main__":
     elif cmd == "free_port":
         p = sys.argv[2] if len(sys.argv) > 2 else "9999"
         print(find_free_port(p))
+    elif cmd == "drives":
+        print(json.dumps(list_storage_drives(force=True)))
 EOF
     chmod +x "$HELPER_PY"
 fi
@@ -423,9 +532,130 @@ for i, r in enumerate(results, 1):
     fi
 }
 
+# ── Storage Drives ───────────────────────────────────────────────────
+# Every writable APFS/HFS+ volume is a candidate library; nothing is
+# configured by hand.  Each drive keeps models in <drive>/MLX-Models/hub.
+list_drives_table() {
+    python3 -c "
+import sys
+sys.path.insert(0, '$PID_DIR')
+sys.path.insert(0, '$SCRIPT_DIR')
+import mlx_helper as h
+
+drives = h.list_storage_drives(force=True)
+default = h.get_default_drive(drives)
+default_id = default['id'] if default else ''
+usable = [d for d in drives if d['connected'] and not d['disabled']]
+
+print('💾 MODEL LIBRARY DRIVES')
+print('-' * 78)
+for i, d in enumerate(usable, 1):
+    mark = '*' if d['id'] == default_id else ' '
+    kind = 'INT' if d['internal'] else 'EXT'
+    count = d.get('models', 0)
+    print(f\"{mark} {i}. {d['name']:<24} {kind} {d['free_gb']:>7.1f} GB free  {count:>2} model(s)\")
+    print(f\"      {d['library']}\")
+
+off = [d for d in drives if not d['connected'] and d.get('models')]
+if off:
+    print('-' * 78)
+    print('⚠️  Not connected right now:')
+    for d in off:
+        print(f\"   {d['name']:<24} {d['mount']}  ({d['models']} model(s) offline)\")
+
+print('-' * 78)
+if default:
+    print(f\"Default download target: {default['name']} ({default['free_gb']:.1f} GB free)\")
+print('* = default.  Change it: ./mlx.sh use-drive <name>')
+"
+}
+
+cmd_drives() {
+    list_drives_table
+}
+
+cmd_use_drive() {
+    local sel="${1:-}"
+    if [ -z "$sel" ]; then
+        list_drives_table
+        echo ""
+        echo -n "Set default download drive (name or number): "
+        read -r sel
+    fi
+    [ -z "$sel" ] && return
+    python3 -c "
+import sys
+sys.path.insert(0, '$PID_DIR')
+sys.path.insert(0, '$SCRIPT_DIR')
+import mlx_helper as h
+
+drives = h.list_storage_drives(force=True)
+usable = [d for d in drives if d['connected'] and not d['disabled']]
+sel = '''$sel'''.strip()
+target = None
+if sel.isdigit() and 1 <= int(sel) <= len(usable):
+    target = usable[int(sel) - 1]
+else:
+    for d in usable:
+        if sel.lower() in (d['name'].lower(), d['id'].lower(), d['mount'].lower()):
+            target = d
+            break
+if not target:
+    print(f\"✗ No drive matches '{sel}'\")
+    sys.exit(1)
+h.set_default_drive(target['id'])
+print(f\"✓ Default download drive is now {target['name']} ({target['library']})\")
+"
+}
+
+# Prints "<drive name>|<hub path>" for the drive the user picked, and
+# prompts with the drive list when nothing was passed on the command line.
+resolve_download_drive() {
+    local sel="${1:-}"
+    if [ -z "$sel" ]; then
+        list_drives_table
+        echo ""
+        echo -n "Download to which drive? [Enter = default, name or number]: "
+        read -r sel
+    fi
+    python3 -c "
+import sys
+sys.path.insert(0, '$PID_DIR')
+sys.path.insert(0, '$SCRIPT_DIR')
+import mlx_helper as h
+
+drives = h.list_storage_drives(force=True)
+usable = [d for d in drives if d['connected'] and not d['disabled']]
+sel = '''$sel'''.strip()
+target = None
+if not sel:
+    target = h.get_default_drive(drives)
+elif sel.isdigit() and 1 <= int(sel) <= len(usable):
+    target = usable[int(sel) - 1]
+else:
+    for d in usable:
+        if sel.lower() in (d['name'].lower(), d['id'].lower(), d['mount'].lower()):
+            target = d
+            break
+if not target:
+    print(f\"✗ No such drive: '{sel}'\", file=sys.stderr)
+    sys.exit(1)
+hub, target = h.ensure_library_hub(target['id'])
+print(f\"{target['name']}|{hub}\")
+"
+}
+
 # ── 3. Download / Add Model ──────────────────────────────────────────
 download_model() {
     local model_input="${1:-}"
+    local drive_sel=""
+    shift || true
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --to) drive_sel="${2:-}"; shift 2 2>/dev/null || shift ;;
+            *) drive_sel="$1"; shift ;;
+        esac
+    done
     if [ -z "$model_input" ]; then
         echo ""
         echo -n "Enter Hugging Face Repo ID or URL (e.g. mlx-community/Qwen2.5-Coder-7B-Instruct-4bit or https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-MLX/tree/main/4-bit) [b: Back, e: Exit]: "
@@ -491,6 +721,61 @@ print(f\"  {len(variants)+1}. Download Full Repository (All Quantizations)\")
     echo "Downloading '$display_name' using High Speed Hugging Face CLI ('hf')..."
     echo "---------------------------------------------------------"
 
+    # ── Pick the drive that will hold the weights ────────────────────
+    local drive_resolved
+    drive_resolved=$(resolve_download_drive "$drive_sel") || return
+    local drive_name="${drive_resolved%%|*}"
+    local hub_dir="${drive_resolved##*|}"
+    echo "💾 Target drive: $drive_name"
+    echo "📁 Model library: $hub_dir"
+    echo ""
+
+    # Free-space guard: ask the HF API for the weight size before downloading.
+    local space_json
+    space_json=$(python3 -c "
+import sys, json, os
+sys.path.insert(0, '$PID_DIR')
+sys.path.insert(0, '$SCRIPT_DIR')
+import mlx_helper as h
+info = h.fetch_repo_size_info('$repo_id')
+need = 0.0
+try:
+    if info.get('weights_gb'):
+        need = round(info['weights_gb'] * 1.05, 1)
+    elif info.get('est_ram_gb'):
+        need = round(info['est_ram_gb'] * 0.85, 1)
+except Exception:
+    pass
+free = 0.0
+try:
+    st = os.statvfs('$hub_dir')
+    free = round(st.f_bavail * st.f_frsize / (1024**3), 1)
+except Exception:
+    pass
+print(json.dumps({'need': need, 'free': free}))
+" 2>/dev/null)
+
+    local need_gb free_gb
+    need_gb=$(echo "$space_json" | python3 -c "import sys, json; print(json.load(sys.stdin).get('need', 0))" 2>/dev/null || echo 0)
+    free_gb=$(echo "$space_json" | python3 -c "import sys, json; print(json.load(sys.stdin).get('free', 0))" 2>/dev/null || echo 0)
+
+    if awk "BEGIN{exit !($need_gb > 0 && $free_gb > 0 && $need_gb > $free_gb)}"; then
+        echo "⚠️  '$drive_name' has $free_gb GB free but this model needs about $need_gb GB."
+        echo -n "   Pick another drive? [Enter = abort, or drive name/number]: "
+        local alt
+        read -r alt
+        if [ -z "$alt" ]; then
+            echo "✗ Download cancelled — no space on $drive_name."
+            return
+        fi
+        drive_resolved=$(resolve_download_drive "$alt") || return
+        drive_name="${drive_resolved%%|*}"
+        hub_dir="${drive_resolved##*|}"
+        echo "💾 Target drive: $drive_name"
+        echo "📁 Model library: $hub_dir"
+        echo ""
+    fi
+
     export HF_HUB_ENABLE_HF_TRANSFER=1
     export HF_XET_HIGH_PERFORMANCE=1
 
@@ -501,13 +786,17 @@ print(f\"  {len(variants)+1}. Download Full Repository (All Quantizations)\")
     if [ -n "$revision" ] && [ "$revision" != "main" ]; then
         dl_args+=(--revision "$revision")
     fi
+    dl_args+=(--cache-dir "$hub_dir")
 
     if command -v hf &>/dev/null; then
         hf download "${dl_args[@]}"
     elif command -v huggingface-cli &>/dev/null; then
         huggingface-cli download "${dl_args[@]}"
+    elif command -v uvx &>/dev/null; then
+        # No global hf CLI: run it out of a throwaway uv environment.
+        uvx --from "huggingface_hub[hf_transfer]" hf download "${dl_args[@]}"
     else
-        python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='$repo_id', allow_patterns=['$subfolder/*'] if '$subfolder' else None)"
+        python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='$repo_id', allow_patterns=['$subfolder/*'] if '$subfolder' else None, cache_dir='$hub_dir')"
     fi
 
     echo ""
@@ -1043,7 +1332,7 @@ main_menu() {
     while true; do
         clear 2>/dev/null || true
         echo "╔════════════════════════════════════════════════════════════╗"
-        echo "║       MLX Model Control Center v0.6 (Filters & RAM)        ║"
+        echo "║        MLX Model Control Center v0.7 (Multi-Drive)         ║"
         echo "╚════════════════════════════════════════════════════════════╝"
         show_running_header
         echo "  1. List Downloaded Models (Select # to Launch)"
@@ -1096,7 +1385,9 @@ case "${1:-}" in
     stop|kill) stop_model "${2:-}" ;;
     list) list_models false ;;
     search) search_hf "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
-    download) download_model "${2:-}" ;;
+    download) shift; download_model "$@" ;;
+    drives|storage) cmd_drives ;;
+    use-drive|drive) cmd_use_drive "${2:-}" ;;
     delete) delete_model ;;
     status|running) view_health ;;
     logs) view_logs ;;

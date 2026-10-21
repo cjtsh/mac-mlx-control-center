@@ -54,7 +54,302 @@ def get_mlx_env():
     env["HF_XET_HIGH_PERFORMANCE"] = "1"
     return env
 
-def get_download_cmd(repo_id, subfolder="", revision=""):
+STORAGE_FILE = os.path.expanduser("~/.mlx_pids/storage.json")
+LIBRARY_DIRNAME = "MLX-Models"
+MIN_DRIVE_GB = 8
+_DRIVE_CACHE = {"ts": 0.0, "drives": []}
+DRIVE_CACHE_TTL = 20
+_TM_CACHE = {"ts": 0.0, "mounts": set()}
+
+def load_storage_config():
+    """Persisted storage preferences: default drive, known drives (by UUID), disabled drives."""
+    cfg = {"default_drive": "", "known": {}, "disabled": []}
+    if os.path.exists(STORAGE_FILE):
+        try:
+            with open(STORAGE_FILE, "r") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                cfg.update(data)
+        except Exception:
+            pass
+    if not isinstance(cfg.get("known"), dict):
+        cfg["known"] = {}
+    if not isinstance(cfg.get("disabled"), list):
+        cfg["disabled"] = []
+    return cfg
+
+def save_storage_config(cfg):
+    try:
+        os.makedirs(os.path.dirname(STORAGE_FILE), exist_ok=True)
+        with open(STORAGE_FILE, "w") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception:
+        pass
+
+def _diskutil_field(mount, field):
+    """Reads a single field from `diskutil info` for a mounted volume."""
+    try:
+        out = subprocess.check_output(["diskutil", "info", mount], text=True,
+                                      timeout=6, stderr=subprocess.DEVNULL)
+    except Exception:
+        return ""
+    m = re.search(r"^\s*" + re.escape(field) + r"\s*:\s*(.+)$", out, re.M)
+    return m.group(1).strip() if m else ""
+
+def _time_machine_mounts():
+    """Mount points that are Time Machine destinations — offered but flagged, never the default."""
+    now = time.time()
+    if now - _TM_CACHE["ts"] < 120:
+        return _TM_CACHE["mounts"]
+    mounts = set()
+    try:
+        out = subprocess.check_output(["tmutil", "destinationinfo"], text=True,
+                                      timeout=10, stderr=subprocess.DEVNULL)
+        for line in out.splitlines():
+            m = re.search(r"Mount Point\s*:\s*(.+)$", line)
+            if m:
+                mounts.add(os.path.realpath(m.group(1).strip()))
+    except Exception:
+        pass
+    _TM_CACHE["ts"] = now
+    _TM_CACHE["mounts"] = mounts
+    return mounts
+
+def _volume_record(mount, name, internal=False, probe_path=None, library=None):
+    """Builds a drive record for a mounted volume, or None if it cannot host a model library.
+
+    The internal drive is probed through $HOME: "/" is the sealed system volume, which is
+    read-only and reports no free space, while user data lives on a separate volume.
+    """
+    probe = probe_path or mount
+    if not os.path.isdir(probe):
+        return None
+    try:
+        st = os.statvfs(probe)
+    except Exception:
+        return None
+    total_bytes = st.f_frsize * st.f_blocks
+    free_bytes = st.f_frsize * st.f_bavail
+    total_gb = total_bytes / (1024 ** 3)
+    if total_gb < MIN_DRIVE_GB:
+        return None
+    if st.f_flag & getattr(os, "ST_RDONLY", 1):
+        return None
+    if not os.access(probe, os.W_OK):
+        return None
+
+    fs = _diskutil_field(mount, "File System Personality")
+    fs_l = fs.lower()
+    # Hugging Face caches rely on symlinks: only APFS/HFS+ can host a library.
+    if not ("apfs" in fs_l or "hfs" in fs_l):
+        return None
+    if "ntfs" in fs_l or "exfat" in fs_l or "ms-dos" in fs_l or "fat32" in fs_l:
+        return None
+
+    uuid = _diskutil_field(mount, "Volume UUID")
+    drive_id = uuid if uuid and uuid not in ("Not applicable", "-") else f"mount:{mount}"
+
+    library = library or os.path.join(mount, LIBRARY_DIRNAME, "hub")
+    model_count = 0
+    if os.path.isdir(library):
+        try:
+            model_count = len([d for d in os.listdir(library) if d.startswith("models--")])
+        except Exception:
+            model_count = 0
+
+    is_tm = os.path.realpath(mount) in _time_machine_mounts()
+
+    return {
+        "id": drive_id,
+        "name": name,
+        "mount": mount,
+        "internal": bool(internal),
+        "fs": fs or "unknown",
+        "total_gb": round(total_gb, 1),
+        "free_gb": round(free_bytes / (1024 ** 3), 1),
+        "library": library,
+        "library_exists": os.path.isdir(library),
+        "models": model_count,
+        "is_time_machine": is_tm,
+        "connected": True,
+    }
+
+def list_storage_drives(force=False, include_known=True):
+    """Live list of mounted volumes usable as model libraries (discovered, never configured)."""
+    now = time.time()
+    if not force and _DRIVE_CACHE["drives"] and (now - _DRIVE_CACHE["ts"] < DRIVE_CACHE_TTL):
+        drives = [dict(d) for d in _DRIVE_CACHE["drives"]]
+    else:
+        drives = []
+        root = _volume_record("/", "Macintosh HD", internal=True,
+                              probe_path=os.path.expanduser("~"),
+                              library=os.path.expanduser(os.path.join("~", LIBRARY_DIRNAME, "hub")))
+        if root:
+            drives.append(root)
+
+        try:
+            entries = sorted(os.listdir("/Volumes"))
+        except Exception:
+            entries = []
+        for entry in entries:
+            if entry.startswith("."):
+                continue
+            mount = os.path.join("/Volumes", entry)
+            if not os.path.ismount(mount):
+                continue
+            rec = _volume_record(mount, entry)
+            if rec:
+                drives.append(rec)
+
+        _DRIVE_CACHE["ts"] = now
+        _DRIVE_CACHE["drives"] = [dict(d) for d in drives]
+
+    cfg = load_storage_config()
+    disabled = set(cfg.get("disabled") or [])
+    seen = {d["id"] for d in drives}
+    known = cfg.get("known") or {}
+
+    # Remember connected drives so an unplugged one can still be shown as "not connected".
+    changed = False
+    for d in drives:
+        prev = known.get(d["id"]) or {}
+        entry = {
+            "name": d["name"],
+            "mount": d["mount"],
+            "internal": d["internal"],
+            "models": d["models"],
+            "total_gb": d["total_gb"],
+            "is_time_machine": d["is_time_machine"],
+        }
+        if prev != entry:
+            known[d["id"]] = entry
+            changed = True
+    if changed:
+        cfg["known"] = known
+        save_storage_config(cfg)
+
+    for d in drives:
+        d["disabled"] = d["id"] in disabled
+        d["is_default"] = (d["id"] == cfg.get("default_drive"))
+
+    if include_known:
+        for did, info in known.items():
+            if did in seen:
+                continue
+            mount = info.get("mount", "") or ""
+            drives.append({
+                "id": did,
+                "name": info.get("name", "Unknown drive"),
+                "mount": mount,
+                "internal": bool(info.get("internal")),
+                "fs": "unknown",
+                "total_gb": info.get("total_gb", 0),
+                "free_gb": 0,
+                "library": os.path.join(mount, LIBRARY_DIRNAME, "hub") if mount else "",
+                "library_exists": True,
+                "models": info.get("models", 0),
+                "is_time_machine": bool(info.get("is_time_machine")),
+                "connected": False,
+                "disabled": did in disabled,
+                "is_default": (did == cfg.get("default_drive")),
+            })
+
+    drives.sort(key=lambda d: (not d.get("is_default"), d.get("internal", False),
+                              not d.get("connected", True), d.get("name", "")))
+    return drives
+
+def get_drive(drive_id):
+    """Looks up a drive by UUID (or mount path / name as a fallback)."""
+    for d in list_storage_drives():
+        if d["id"] == drive_id or d["mount"] == drive_id or d["name"] == drive_id:
+            return d
+    return None
+
+def pick_default_drive(drives=None):
+    """Prefers a connected external (non-Time-Machine) drive with the most free space."""
+    drives = drives if drives is not None else list_storage_drives()
+    connected = [d for d in drives if d.get("connected") and not d.get("disabled")]
+    if not connected:
+        return None
+    ranked = sorted(
+        connected,
+        key=lambda d: (
+            bool(d.get("is_time_machine")),
+            bool(d.get("internal")),
+            -float(d.get("free_gb") or 0),
+        ),
+    )
+    return ranked[0]
+
+def get_default_drive(drives=None):
+    """Configured default drive, falling back to the best available volume."""
+    cfg = load_storage_config()
+    configured = cfg.get("default_drive") or ""
+    drives = drives if drives is not None else list_storage_drives()
+    if configured:
+        for d in drives:
+            if d["id"] == configured and d.get("connected") and not d.get("disabled"):
+                return d
+    chosen = pick_default_drive(drives)
+    if chosen and chosen["id"] != configured:
+        cfg["default_drive"] = chosen["id"]
+        save_storage_config(cfg)
+    return chosen
+
+def set_default_drive(drive_id):
+    cfg = load_storage_config()
+    cfg["default_drive"] = drive_id or ""
+    save_storage_config(cfg)
+    _DRIVE_CACHE["ts"] = 0.0
+    return get_default_drive(list_storage_drives(force=True))
+
+def resolve_library_hub(drive_id=None):
+    """Returns (hub_path, drive_record) without creating anything."""
+    drive = get_drive(drive_id) if drive_id else get_default_drive()
+    if not drive:
+        return os.path.expanduser("~/.cache/huggingface/hub"), None
+    if not drive.get("connected"):
+        return drive.get("library") or "", drive
+    return drive["library"], drive
+
+def ensure_library_hub(drive_id=None):
+    """Creates <drive>/MLX-Models/hub on demand and returns (hub_path, drive)."""
+    hub, drive = resolve_library_hub(drive_id)
+    if hub and drive and drive.get("connected"):
+        try:
+            os.makedirs(hub, exist_ok=True)
+        except Exception:
+            pass
+    return hub, drive
+
+def library_hub_paths():
+    """Hub directories for every connected drive, plus the legacy internal cache."""
+    paths = []
+    legacy = os.path.expanduser("~/.cache/huggingface/hub")
+    if os.path.isdir(legacy):
+        paths.append(legacy)
+    for d in list_storage_drives():
+        if d.get("connected") and d.get("library") and d["library"] not in paths:
+            paths.append(d["library"])
+    return paths
+
+def drive_for_path(path):
+    """Maps an absolute model path to the drive record that hosts it."""
+    if not path:
+        return None
+    real = os.path.realpath(path)
+    best = None
+    for d in list_storage_drives():
+        lib = d.get("library") or ""
+        if not lib or not d.get("connected"):
+            continue
+        base = os.path.dirname(lib)
+        if real == os.path.realpath(base) or real.startswith(os.path.realpath(base) + os.sep):
+            if best is None or len(base) > len(os.path.dirname(best.get("library") or "")):
+                best = d
+    return best
+
+def get_download_cmd(repo_id, subfolder="", revision="", cache_dir=""):
     """Finds available Hugging Face download CLI tool (hf, huggingface-cli, or uvx fallback)."""
     import shutil
     hf_path = shutil.which("hf")
@@ -78,6 +373,8 @@ def get_download_cmd(repo_id, subfolder="", revision=""):
         cmd.extend(["--include", f"{subfolder}/*"])
     if revision and revision != "main":
         cmd.extend(["--revision", revision])
+    if cache_dir:
+        cmd.extend(["--cache-dir", cache_dir])
     return cmd
 
 def parse_hf_identifier(input_str, explicit_subfolder=""):
@@ -365,14 +662,23 @@ def sync_pi_and_opencode(active_model, port=9999, is_vision=False):
     except Exception:
         pass
 
-def find_local_models():
-    search_paths = [
-        os.path.expanduser("~/.cache/huggingface/hub"),
+def find_local_models(extra_roots=None):
+    """Scans every storage library (internal cache + each mounted drive) for installed models."""
+    search_paths = []
+    for p in library_hub_paths():
+        if p not in search_paths:
+            search_paths.append(p)
+    for p in [
         os.path.expanduser("~/MLXConsole/models/hub"),
         os.path.expanduser("~/.lmstudio/hub/models"),
         os.path.expanduser("~/.cache/lmstudio/models"),
         os.path.expanduser("~/mlx_models"),
-    ]
+    ]:
+        if p not in search_paths:
+            search_paths.append(p)
+    for p in (extra_roots or []):
+        if p and p not in search_paths:
+            search_paths.append(p)
     models = []
     seen_paths = set()
 
@@ -472,6 +778,8 @@ def find_local_models():
 
                 date_added_str = time.strftime("%b %d, %Y", time.localtime(model_ts))
 
+                host_drive = drive_for_path(root)
+
                 models.append({
                     "name": display_name,
                     "base_name": base_name,
@@ -486,7 +794,9 @@ def find_local_models():
                     "is_vision": is_vis,
                     "engine": "mlx-vlm" if is_vis else "mlx-lm",
                     "created_ts": round(model_ts, 1),
-                    "date_added": date_added_str
+                    "date_added": date_added_str,
+                    "drive_id": (host_drive or {}).get("id", ""),
+                    "drive_name": (host_drive or {}).get("name", "Internal cache" if os.path.realpath(root).startswith(os.path.expanduser("~/.cache/huggingface")) else ""),
                 })
     return models
 
@@ -571,9 +881,14 @@ def get_active_downloads():
                 display_name = parsed["display_name"]
 
                 cache_dir = ""
+                hub_root = ""
+                cd_match = re.search(r"--cache-dir[=\s]+([^\s\"']+)", line)
+                if cd_match:
+                    hub_root = cd_match.group(1)
                 if "/" in repo_id:
                     org, repo = repo_id.split("/", 1)
-                    cache_dir = os.path.expanduser(f"~/.cache/huggingface/hub/models--{org}--{repo}")
+                    base_hub = hub_root or os.path.expanduser("~/.cache/huggingface/hub")
+                    cache_dir = os.path.join(base_hub, f"models--{org}--{repo}")
 
                 downloaded_bytes = 0
                 if cache_dir and os.path.exists(cache_dir):
@@ -685,6 +1000,15 @@ def get_active_downloads():
                 "status": "PAUSED",
                 "cache_dir": cache_dir
             })
+
+    # uvx wraps the download in several processes; list each repo once.
+    deduped = {}
+    for d in downloads:
+        key = d.get("download_id") or d.get("repo_id")
+        prev = deduped.get(key)
+        if prev is None or (d.get("pid") and not prev.get("pid")):
+            deduped[key] = d
+    downloads = list(deduped.values())
 
     return downloads
 
@@ -1420,6 +1744,15 @@ if __name__ == "__main__":
                                        quant=qt, max_ram=mr)))
     elif cmd == "repo_size":
         print(json.dumps(fetch_repo_size_info(sys.argv[2] if len(sys.argv) > 2 else "")))
+    elif cmd == "drives":
+        print(json.dumps({
+            "drives": list_storage_drives(force=True),
+            "default": (get_default_drive() or {}).get("id", ""),
+        }))
+    elif cmd == "set_drive":
+        target = sys.argv[2] if len(sys.argv) > 2 else ""
+        d = set_default_drive(target)
+        print(json.dumps({"default": (d or {}).get("name", "")}))
     elif cmd == "free_port":
         p = sys.argv[2] if len(sys.argv) > 2 else "9999"
         print(find_free_port(p))
