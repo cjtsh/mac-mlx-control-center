@@ -1,5 +1,5 @@
 
-# ⚡ macOS MLX Control Center `v0.8.0` (Fast Parallel Downloads Edition)
+# ⚡ macOS MLX Control Center `v0.8.1` (Fast Parallel Downloads Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 

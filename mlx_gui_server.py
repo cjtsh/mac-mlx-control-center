@@ -737,7 +737,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.8.0 (Fast Downloads)</title>
+  <title>macOS MLX Control Center v0.8.1 (Fast Downloads)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1178,7 +1178,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.8.0 (Fast Downloads)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.8.1 (Fast Downloads)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
@@ -3351,7 +3351,8 @@ INDEX_HTML = """<!DOCTYPE html>
       try {
         const res = await fetch(`/api/repo_variants?repo_id=${encodeURIComponent(repoId)}`);
         const data = await res.json();
-        if (data.variants && data.variants.length > 0) {
+        // One variant is the model itself — only offer a choice when there is one.
+        if (data.variants && data.variants.length > 1) {
           showQuantModal(repoId, data.variants, info);
           return;
         }

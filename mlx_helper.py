@@ -825,9 +825,16 @@ def get_repo_quant_variants(repo_id):
                 elif re.match(r"^\d+(-|_)?bit$", dl):
                     quant_dirs.append(d)
             
+            # No quant-looking subfolder means this repo IS a single quantization:
+            # a `manifests/` or `assets/` directory must never look like a choice.
+            if not quant_dirs:
+                return []
+
             variants = []
-            for qd in (quant_dirs if quant_dirs else dirs):
+            for qd in quant_dirs:
                 sz = get_repo_files_size(repo_id, subfolder=qd)
+                if sz < 100 * 1024 * 1024:  # config/manifest folders are not variants
+                    continue
                 sz_gb = sz / (1024**3)
                 sz_str = f"{sz_gb:.1f} GB" if sz_gb >= 1 else f"{sz/(1024**2):.1f} MB"
                 label = qd
