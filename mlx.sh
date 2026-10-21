@@ -13,7 +13,15 @@ DEFAULT_PORT=9999
 DEFAULT_HOST="127.0.0.1"
 
 mkdir -p "$MODEL_DIR" "$PID_DIR" "$LOG_DIR"
-HELPER_PY="$PID_DIR/mlx_helper.py"
+
+# Prefer the helper shipped next to this script (keeps CLI in sync with the GUI),
+# falling back to the copy installed in $PID_DIR for standalone installs.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/mlx_helper.py" ]; then
+    HELPER_PY="$SCRIPT_DIR/mlx_helper.py"
+else
+    HELPER_PY="$PID_DIR/mlx_helper.py"
+fi
 
 # Ensure Python helper exists
 if [ ! -f "$HELPER_PY" ]; then
@@ -126,7 +134,44 @@ def get_running_servers():
 
     return list(unique.values())
 
-def search_hf_api(query, limit=15):
+def _params_from_name(rid):
+    rid = (rid or "").lower()
+    m = re.search(r"(?<![0-9a-z])(\d+)x(\d+(?:\.\d+)?)b(?![0-9a-z])", rid)
+    if m:
+        return int(m.group(1)) * float(m.group(2))
+    m = re.search(r"(?<![0-9a-z.])(\d+(?:\.\d+)?)b(?![0-9a-z])", rid)
+    return float(m.group(1)) if m else None
+
+def repo_size_info(repo_id):
+    """Exact weight size + param count from the HF API (blobs=true)."""
+    exts = (".safetensors", ".gguf", ".bin", ".pt", ".pth")
+    try:
+        url = f"https://huggingface.co/api/models/{urllib.parse.quote(repo_id, safe='/')}?blobs=true"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode())
+        groups = {}
+        for s in data.get("siblings") or []:
+            fn = s.get("rfilename") or ""
+            sz = s.get("size") or 0
+            if sz > 0 and fn.lower().endswith(exts):
+                d = os.path.dirname(fn)
+                groups[d] = groups.get(d, 0) + sz
+        wb = max(groups.values()) if groups else 0
+        st = data.get("safetensors") or {}
+        total = st.get("total") or (st.get("parameters") or {}).get("total")
+        pb = (total / 1e9) if total else _params_from_name(repo_id)
+        if wb:
+            est = round(wb / 1e9 * 1.06 + min(8.0, max(0.75, (pb or 0) * 0.02)) + 1.5, 1)
+        elif pb:
+            est = round(pb * 0.62 + 2.0, 1)
+        else:
+            est = 0.0
+        return {"weights_gb": round(wb / 1e9, 2), "params_b": pb, "est_ram_gb": est}
+    except Exception:
+        return {"weights_gb": 0.0, "params_b": _params_from_name(repo_id), "est_ram_gb": 0.0}
+
+def search_hf_api(query, limit=15, max_ram=None):
     q = urllib.parse.quote(query)
     url = f"https://huggingface.co/api/models?search={q}&limit={limit}&sort=downloads&direction=-1"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -142,6 +187,18 @@ def search_hf_api(query, limit=15):
                 })
     except Exception:
         pass
+    if results:
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=12) as pool:
+                infos = list(pool.map(lambda r: repo_size_info(r["id"]), results))
+            for r, info in zip(results, infos):
+                r.update(info)
+        except Exception:
+            for r in results:
+                r.update({"weights_gb": 0.0, "params_b": None, "est_ram_gb": 0.0})
+    if max_ram:
+        results = [r for r in results if not r.get("est_ram_gb") or r["est_ram_gb"] <= float(max_ram)]
     return results
 
 def find_free_port(start_port=9999):
@@ -161,7 +218,8 @@ if __name__ == "__main__":
         print(json.dumps(get_running_servers()))
     elif cmd == "search_hf":
         q = sys.argv[2] if len(sys.argv) > 2 else "mlx"
-        print(json.dumps(search_hf_api(q)))
+        mr = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] else None
+        print(json.dumps(search_hf_api(q, max_ram=mr)))
     elif cmd == "free_port":
         p = sys.argv[2] if len(sys.argv) > 2 else "9999"
         print(find_free_port(p))
@@ -256,6 +314,7 @@ for i, m in enumerate(models, 1):
 # ── 2. Search Hugging Face ───────────────────────────────────────────
 search_hf() {
     local query="${1:-}"
+    local max_ram="${2:-}"
     if [ -z "$query" ]; then
         echo ""
         echo -n "Enter search term for Hugging Face (e.g. mlx, qwen, llama) [default: mlx] (b: Back, e: Exit): "
@@ -264,18 +323,37 @@ search_hf() {
         [ -z "$query" ] && query="mlx"
     fi
 
+    # How much unified memory can a model actually use on this Mac?
+    local usable_ram
+    usable_ram=$(sysctl -n hw.memsize 2>/dev/null | awk '{printf "%.1f", $1/1073741824*0.88}')
+    [ -z "$usable_ram" ] && usable_ram="0"
+
+    if [ -z "$max_ram" ]; then
+        echo ""
+        echo -n "RAM budget in GB — only show models that fit [Enter = this Mac's usable ${usable_ram} GB, 'all' = no limit]: "
+        read -r max_ram
+        check_nav "$max_ram" || return
+    fi
+    if [ "$max_ram" = "all" ] || [ "$max_ram" = "0" ]; then
+        max_ram=""
+    fi
+
     echo ""
-    echo "Searching Hugging Face for '$query'..."
+    if [ -n "$max_ram" ]; then
+        echo "Searching Hugging Face for '$query' (RAM budget: ${max_ram} GB)..."
+    else
+        echo "Searching Hugging Face for '$query' (no RAM budget)..."
+    fi
     echo "---------------------------------------------------------"
 
     local results_json
-    results_json=$(python3 "$HELPER_PY" search_hf "$query")
+    results_json=$(python3 "$HELPER_PY" search_hf "$query" "$max_ram")
 
     local count
     count=$(echo "$results_json" | python3 -c "import sys, json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)
 
     if [ "$count" -eq 0 ]; then
-        echo "No results found on Hugging Face."
+        echo "No results found on Hugging Face${max_ram:+ within ${max_ram} GB RAM}."
         echo ""
         read -r -p "Press Enter to return..."
         return
@@ -285,9 +363,15 @@ search_hf() {
 import sys, json
 results = json.load(sys.stdin)
 for i, r in enumerate(results, 1):
-    print(f'  {i:2d}. {r[\"id\"]:<55} Downloads: {r[\"downloads\"]:>7,} | Likes: {r[\"likes\"]:>4}')
+    est = r.get('est_ram_gb') or 0
+    weights = r.get('weights_gb') or 0
+    params = r.get('params_b')
+    size = f'{est:5.1f} GB RAM' if est else '       ? GB'
+    pub = f'({params:.1f}B)' if params else ''
+    print(f'  {i:2d}. {r[\"id\"]:<52} {size} {weights:6.1f} GB weights {pub:<12} Downloads: {r[\"downloads\"]:>7,}')
 "
     echo "---------------------------------------------------------"
+    echo "  Fit status is relative to ${max_ram:-unlimited} GB RAM budget."
     echo ""
     echo -n "Enter number [1-$count] to Download, [s] New Search, [b] Back, [e] Exit: "
     read -r choice
@@ -922,7 +1006,7 @@ main_menu() {
     while true; do
         clear 2>/dev/null || true
         echo "╔════════════════════════════════════════════════════════════╗"
-        echo "║       MLX Model Control Center v0.4 (Vision & Text)        ║"
+        echo "║       MLX Model Control Center v0.5 (Vision & Text)        ║"
         echo "╚════════════════════════════════════════════════════════════╝"
         show_running_header
         echo "  1. List Downloaded Models (Select # to Launch)"
@@ -974,7 +1058,7 @@ case "${1:-}" in
     start) start_model "${2:-}" ;;
     stop|kill) stop_model "${2:-}" ;;
     list) list_models false ;;
-    search) search_hf "${2:-}" ;;
+    search) search_hf "${2:-}" "${3:-}" ;;
     download) download_model "${2:-}" ;;
     delete) delete_model ;;
     status|running) view_health ;;

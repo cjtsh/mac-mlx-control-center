@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-import os, sys, json, subprocess, re, urllib.request, urllib.parse, socket, time
+import os, sys, json, subprocess, re, urllib.request, urllib.parse, socket, time, threading
 
 _REPO_SIZE_CACHE = {}
 _SPEED_CACHE = {}
 PAUSED_FILE = os.path.expanduser("~/.mlx_pids/paused_downloads.json")
 SETTINGS_FILE = os.path.expanduser("~/.mlx_pids/settings.json")
+SIZE_INFO_CACHE_FILE = os.path.expanduser("~/.mlx_pids/repo_sizes.json")
+SIZE_INFO_TTL = 14 * 86400  # re-check repo sizes every 2 weeks
+_SIZE_INFO_CACHE = {}
+_SIZE_INFO_LOCK = threading.Lock()
+WEIGHT_FILE_EXTS = (".safetensors", ".gguf", ".bin", ".pt", ".pth", ".npz", ".h5")
 
 def load_global_settings():
     default_settings = {
@@ -751,10 +756,14 @@ def get_system_stats():
     except Exception:
         pass
 
+    # RAM a model can realistically use: macOS keeps a wired/GPU reserve and compresses memory
+    usable_ram = max(total_ram - max(4 * 1024**3, total_ram * 0.12), total_ram * 0.55)
+
     return {
         "total_ram_gb": round(total_ram / (1024**3), 1),
         "used_ram_gb": round(used_ram / (1024**3), 1),
         "free_ram_gb": round(free_ram / (1024**3), 1),
+        "usable_ram_gb": round(usable_ram / (1024**3), 1),
         "cached_ram_gb": round(cached_ram / (1024**3), 1),
         "app_ram_gb": round(anonymous / (1024**3), 1),
         "wired_ram_gb": round(wired / (1024**3), 1),
@@ -907,32 +916,292 @@ def kill_process_by_pid(pid):
     except Exception as e:
         return {"error": str(e)}
 
+# Quantization markers that must never be mistaken for a parameter count (e.g. "4bit" != "4B").
+_QUANT_NAME_RE = re.compile(
+    r"(?<![0-9a-z])("
+    r"(?:i?q[1-8])(?:[._-][a-z0-9]{1,5}){0,3}"   # q4, q4_k_m, iq3_xxs
+    r"|f(?:16|32)|bf16|mxfp4"
+    r"|[2-8][ ._-]?bit"
+    r")(?![0-9a-z])",
+    re.I
+)
+
+_PARAM_COUNT_RE = re.compile(r"(?<![0-9a-z.])(\d+(?:\.\d+)?)b(?![0-9a-z])", re.I)
+_PARAM_MILLION_RE = re.compile(r"(?<![0-9a-z.])(\d+(?:\.\d+)?)m(?![0-9a-z])", re.I)
+_PARAM_MOE_RE = re.compile(r"(?<![0-9a-z])(\d+)x(\d+(?:\.\d+)?)b(?![0-9a-z])", re.I)
+
+
+def _parse_params_from_name(repo_id):
+    """Parse parameter count (billions) from a repo id, ignoring quant labels like 4bit/8-bit/q4."""
+    rid = (repo_id or "").lower()
+    m = _PARAM_MOE_RE.search(rid)  # Mixtral-8x7B style
+    if m:
+        return round(int(m.group(1)) * float(m.group(2)), 2)
+    m = _PARAM_COUNT_RE.search(rid)
+    if m:
+        val = float(m.group(1))
+        if 0.05 <= val <= 2000:
+            return val
+    m = _PARAM_MILLION_RE.search(rid)  # granite-4.0-350m style
+    if m:
+        return round(float(m.group(1)) / 1000, 3)
+    return None
+
+
+def _detect_quant_label(repo_id, bits=None):
+    """Best-effort quantization label such as '4-bit'."""
+    if bits:
+        try:
+            return f"{int(bits)}-bit"
+        except Exception:
+            pass
+    rid = (repo_id or "").lower()
+    m = re.search(r"(?<![0-9])([2-8])[ ._-]?bit", rid)
+    if m:
+        return f"{m.group(1)}-bit"
+    if "fp32" in rid:
+        return "32-bit"
+    if "fp16" in rid or "bf16" in rid:
+        return "16-bit"
+    return ""
+
+
+def _load_size_info_cache():
+    try:
+        with open(SIZE_INFO_CACHE_FILE, "r") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_size_info_cache(cache):
+    try:
+        os.makedirs(os.path.dirname(SIZE_INFO_CACHE_FILE), exist_ok=True)
+        tmp = SIZE_INFO_CACHE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cache, f)
+        os.replace(tmp, SIZE_INFO_CACHE_FILE)
+    except Exception:
+        pass
+
+
+def _best_weight_group(siblings):
+    """Pick the weight files that represent downloading ONE quant of a repo.
+
+    Handles: plain MLX repos (sharded safetensors at root), repos with per-quant
+    subfolders (e.g. 4-bit/, 8-bit/) and GGUF repos holding several quants at root.
+    Returns (bytes, subfolder, quant_label).
+    """
+    entries = []
+    for s in siblings or []:
+        fn = s.get("rfilename") or ""
+        size = s.get("size") or 0
+        if size <= 0 or not fn.lower().endswith(WEIGHT_FILE_EXTS):
+            continue
+        entries.append((fn, size))
+    if not entries:
+        return 0, None, None
+
+    # Never double count duplicated formats (some repos ship .bin + .safetensors)
+    for ext in (".safetensors", ".gguf"):
+        subset = [e for e in entries if e[0].lower().endswith(ext)]
+        if subset:
+            entries = subset
+            break
+
+    dir_totals = {}
+    for fn, size in entries:
+        d = os.path.dirname(fn)
+        dir_totals[d] = dir_totals.get(d, 0) + size
+    best_dir, best_size = max(dir_totals.items(), key=lambda kv: kv[1])
+
+    group = [(fn, size) for fn, size in entries if os.path.dirname(fn) == best_dir]
+    # A single folder may still hold several quants (common for GGUF repos): split by quant token
+    by_quant = {}
+    for fn, size in group:
+        m = _QUANT_NAME_RE.search(os.path.basename(fn))
+        key = (m.group(1).lower().replace(" ", "-").replace("_", "-")) if m else ""
+        by_quant[key] = by_quant.get(key, 0) + size
+
+    if len(by_quant) > 1:
+        four_bit = [k for k in by_quant if "4" in k]
+        if four_bit:
+            key = max(four_bit, key=lambda k: by_quant[k])
+        else:
+            key = min(by_quant, key=lambda k: by_quant[k])
+        return by_quant[key], (best_dir or None), (key or None)
+
+    return best_size, (best_dir or None), None
+
+
+def estimate_ram_gb_from_info(weights_gb, params_b=0.0):
+    """RAM needed to run a model: weights + runtime overhead + KV cache + context reserve."""
+    if not weights_gb or weights_gb <= 0:
+        return 0.0
+    kv_gb = min(8.0, max(0.75, float(params_b or 0) * 0.02))
+    return round(weights_gb * 1.06 + kv_gb + 1.5, 1)
+
+
+def get_usable_ram_gb(stats=None):
+    """RAM a model can realistically use on macOS after system/GPU reserves."""
+    stats = stats if stats is not None else get_system_stats()
+    total = float(stats.get("total_ram_gb") or 0)
+    if total <= 0:
+        return 16.0
+    reserve = max(4.0, total * 0.12)
+    return round(max(total - reserve, total * 0.55), 1)
+
+
+def fetch_repo_size_info(repo_id):
+    """Exact weight size + parameter count for a Hugging Face repo (disk-cached).
+
+    Returns: weights_gb (size of one quant), params_b (billions), quant, est_ram_gb, source.
+    """
+    key = (repo_id or "").strip()
+    if not key:
+        return {"weights_gb": 0.0, "params_b": None, "quant": "", "est_ram_gb": 0.0, "source": "none"}
+
+    with _SIZE_INFO_LOCK:
+        cached = _SIZE_INFO_CACHE.get(key)
+    if cached:
+        return dict(cached)
+
+    disk = _load_size_info_cache()
+    entry = disk.get(key)
+    if entry and (time.time() - float(entry.get("ts", 0))) < SIZE_INFO_TTL:
+        info = {k: v for k, v in entry.items() if k != "ts"}
+        with _SIZE_INFO_LOCK:
+            _SIZE_INFO_CACHE[key] = info
+        return dict(info)
+
+    info = {
+        "weights_gb": 0.0,
+        "params_b": _parse_params_from_name(key),
+        "quant": _detect_quant_label(key),
+        "source": "name",
+    }
+    subfolder = None
+    try:
+        url = f"https://huggingface.co/api/models/{urllib.parse.quote(key, safe='/')}?blobs=true"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode())
+        weights_bytes, subfolder, _label = _best_weight_group(data.get("siblings") or [])
+        if weights_bytes > 0:
+            info["weights_gb"] = round(weights_bytes / 1e9, 2)
+            info["source"] = "hf"
+        st = data.get("safetensors") or {}
+        params_total = st.get("total") or (st.get("parameters") or {}).get("total")
+        if params_total:
+            info["params_b"] = round(float(params_total) / 1e9, 2)
+        bits = ((data.get("config") or {}).get("quantization_config") or {}).get("bits")
+        quant = _detect_quant_label(key, bits)
+        if quant:
+            info["quant"] = quant
+    except Exception:
+        pass
+
+    if subfolder:
+        info["subfolder"] = subfolder
+    if info["weights_gb"]:
+        info["est_ram_gb"] = estimate_ram_gb_from_info(info["weights_gb"], info["params_b"] or 0.0)
+    elif info["params_b"]:
+        # Weights unavailable (gated/nonexistent repo): fall back to 4-bit per-parameter size
+        info["est_ram_gb"] = round(info["params_b"] * 0.62 + 2.0, 1)
+    else:
+        info["est_ram_gb"] = 0.0
+
+    with _SIZE_INFO_LOCK:
+        _SIZE_INFO_CACHE[key] = info
+    disk[key] = dict(info)
+    disk[key]["ts"] = time.time()
+    _save_size_info_cache(disk)
+    return dict(info)
+
+
 def estimate_ram_requirement(repo_id):
-    """Estimate RAM requirement in GB based on model parameter count in repo ID."""
-    rid = repo_id.lower()
-    if "70b" in rid or "72b" in rid:
-        return 42.0
-    elif "32b" in rid or "35b" in rid or "33b" in rid:
-        return 20.0
-    elif "14b" in rid or "13b" in rid or "12b" in rid or "15b" in rid:
-        return 9.5
-    elif "8b" in rid or "7b" in rid or "9b" in rid:
-        return 5.5
-    elif "4b" in rid or "3b" in rid or "2b" in rid:
-        return 3.2
-    elif "1b" in rid or "0.5b" in rid:
-        return 1.5
+    """Estimate RAM requirement in GB for running a HF model.
+
+    Uses real weight sizes from the Hugging Face API when reachable; falls back to
+    a parameter-count heuristic (quantization labels such as '4bit' are ignored).
+    """
+    info = fetch_repo_size_info(repo_id)
+    if info.get("est_ram_gb"):
+        return info["est_ram_gb"]
+    params_b = info.get("params_b") or _parse_params_from_name(repo_id)
+    if params_b:
+        return round(params_b * 0.62 + 2.0, 1)
     return 6.0
 
-def search_hf_api(query, limit=50, sort="downloads", direction=-1, filter_tag="mlx"):
+def estimate_ram_from_name(repo_id):
+    """Fast RAM estimate (GB) from the repo name only, no network calls."""
+    params_b = _parse_params_from_name(repo_id)
+    if params_b:
+        return round(params_b * 0.62 + 2.0, 1)
+    return 0.0
+
+
+def get_repo_sizes_bulk(repo_ids, workers=12):
+    """Fetch size/param info for many repos concurrently (cached after first run)."""
+    ids = [r for r in dict.fromkeys(repo_ids or []) if r][:120]
+    out = {}
+    if not ids:
+        return out
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(rid):
+        return rid, fetch_repo_size_info(rid)
+
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for rid, info in pool.map(one, ids):
+                out[rid] = info
+    except Exception:
+        for rid in ids:
+            try:
+                out[rid] = fetch_repo_size_info(rid)
+            except Exception:
+                pass
+    return out
+
+
+def _enrich_search_results(results, workers=12, usable_ram_gb=None):
+    """Attach real weight size, parameter count and RAM estimate to search hits."""
+    if not results:
+        return results
+    sizes = get_repo_sizes_bulk([r.get("id", "") for r in results], workers=workers)
+    for item in results:
+        info = sizes.get(item.get("id", "")) or {}
+        weights_gb = info.get("weights_gb") or 0.0
+        est = info.get("est_ram_gb") or 0.0
+        item["weights_gb"] = weights_gb
+        item["params_b"] = info.get("params_b")
+        item["quant"] = info.get("quant") or ""
+        item["est_ram_gb"] = est or estimate_ram_from_name(item.get("id", ""))
+        item["size_known"] = bool(weights_gb)
+        if usable_ram_gb and item["est_ram_gb"]:
+            if item["est_ram_gb"] <= usable_ram_gb * 0.8:
+                item["fits"] = 0
+            elif item["est_ram_gb"] <= usable_ram_gb:
+                item["fits"] = 1
+            else:
+                item["fits"] = 2
+    return results
+
+
+def search_hf_api(query, limit=50, sort="downloads", direction=-1, filter_tag="mlx",
+                  max_ram=None, min_ram=None, usable_ram_gb=None, enrich=True):
     q = urllib.parse.quote(query)
+    size_sort = sort in ("size_asc", "size_desc")
+    api_sort = "downloads" if size_sort else sort
     if filter_tag == "vision":
-        url = f"https://huggingface.co/api/models?search={q}&pipeline_tag=image-text-to-text&limit={limit}&sort={sort}&direction={direction}"
+        url = f"https://huggingface.co/api/models?search={q}&pipeline_tag=image-text-to-text&limit={limit}&sort={api_sort}&direction={direction}"
     elif filter_tag and filter_tag != "all":
-        url = f"https://huggingface.co/api/models?search={q}&limit={limit}&sort={sort}&direction={direction}&filter={filter_tag}"
+        url = f"https://huggingface.co/api/models?search={q}&limit={limit}&sort={api_sort}&direction={direction}&filter={filter_tag}"
     else:
-        url = f"https://huggingface.co/api/models?search={q}&limit={limit}&sort={sort}&direction={direction}"
-        
+        url = f"https://huggingface.co/api/models?search={q}&limit={limit}&sort={api_sort}&direction={direction}"
+
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     results = []
     try:
@@ -943,26 +1212,36 @@ def search_hf_api(query, limit=50, sort="downloads", direction=-1, filter_tag="m
                 tags = item.get("tags", [])
                 pipeline_tag = item.get("pipeline_tag", "text-generation")
                 is_vis = is_vision_model(repo_id) or pipeline_tag == "image-text-to-text" or "vision" in tags or "multimodal" in tags
-                est_ram = estimate_ram_requirement(repo_id)
                 results.append({
                     "id": repo_id,
                     "downloads": item.get("downloads", 0),
                     "likes": item.get("likes", 0),
                     "lastModified": item.get("lastModified", "")[:10] if item.get("lastModified") else "",
                     "tags": tags[:4],
-                    "est_ram_gb": est_ram,
+                    "est_ram_gb": estimate_ram_from_name(repo_id),
+                    "size_known": False,
                     "pipeline_tag": pipeline_tag,
                     "is_vision": is_vis
                 })
     except Exception:
         pass
+
+    if results and enrich:
+        results = _enrich_search_results(results, usable_ram_gb=usable_ram_gb)
+        if max_ram:
+            results = [r for r in results if not r.get("est_ram_gb") or r["est_ram_gb"] <= float(max_ram)]
+        if min_ram:
+            results = [r for r in results if not r.get("est_ram_gb") or r["est_ram_gb"] >= float(min_ram)]
+        if size_sort:
+            results.sort(key=lambda r: r.get("est_ram_gb") or 0.0, reverse=(sort == "size_desc"))
     return results
 
 def compare_models_ai(repo_ids):
     """Generates expert technical AI comparison matrix between selected models for Apple Silicon Mac."""
     comparisons = []
     mac_stats = get_system_stats()
-    free_ram = mac_stats.get("free_ram_gb", 16.0)
+    free_ram = mac_stats.get("usable_ram_gb") or mac_stats.get("free_ram_gb", 16.0)
+    total_ram = mac_stats.get("total_ram_gb", 0)
 
     for rid in repo_ids:
         rid_lower = rid.lower()
@@ -1013,20 +1292,22 @@ def compare_models_ai(repo_ids):
         else:
             verdict = "Requires closing heavy background apps to prevent memory swapping."
 
+        size_info = fetch_repo_size_info(rid)
         comparisons.append({
             "repo_id": rid,
             "quant": quant,
             "quant_desc": quant_desc,
+            "weights_gb": size_info.get("weights_gb") or 0.0,
+            "params_b": size_info.get("params_b"),
             "est_ram_gb": est_ram,
             "fit_status": fit_status,
+            "fits": 0 if est_ram <= free_ram * 0.8 else (1 if est_ram <= free_ram else 2),
             "specialization": spec,
             "is_vision": is_vis,
             "verdict": verdict
         })
 
-    return {"comparisons": comparisons, "free_ram_gb": free_ram}
-
-    return {"comparisons": comparisons, "free_ram_gb": free_ram}
+    return {"comparisons": comparisons, "free_ram_gb": free_ram, "total_ram_gb": total_ram}
 
 def run_model_benchmark(prompt, model, port=9999, host="127.0.0.1"):
     url = f"http://{host}:{port}/v1/chat/completions"
@@ -1099,7 +1380,10 @@ if __name__ == "__main__":
         print(f"Synced configs for {mname}")
     elif cmd == "search_hf":
         q = sys.argv[2] if len(sys.argv) > 2 else "mlx"
-        print(json.dumps(search_hf_api(q)))
+        mr = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] else None
+        print(json.dumps(search_hf_api(q, max_ram=mr)))
+    elif cmd == "repo_size":
+        print(json.dumps(fetch_repo_size_info(sys.argv[2] if len(sys.argv) > 2 else "")))
     elif cmd == "free_port":
         p = sys.argv[2] if len(sys.argv) > 2 else "9999"
         print(find_free_port(p))

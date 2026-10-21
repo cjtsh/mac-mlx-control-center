@@ -142,9 +142,18 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             limit = int(query.get("limit", ["50"])[0])
             sort = query.get("sort", ["downloads"])[0]
             filter_tag = query.get("filter", ["mlx"])[0]
-            results = mlx_helper.search_hf_api(q, limit=limit, sort=sort, filter_tag=filter_tag)
+            max_ram = float(query.get("max_ram", ["0"])[0] or 0) or None
+            usable = mlx_helper.get_usable_ram_gb()
+            results = mlx_helper.search_hf_api(q, limit=limit, sort=sort, filter_tag=filter_tag,
+                                               max_ram=max_ram, usable_ram_gb=usable, enrich=False)
             stats = mlx_helper.get_system_stats()
-            self.send_json({"results": results, "free_ram_gb": stats.get("free_ram_gb", 16.0)})
+            self.send_json({"results": results, "free_ram_gb": stats.get("free_ram_gb", 16.0),
+                            "usable_ram_gb": usable, "total_ram_gb": stats.get("total_ram_gb", 0)})
+        elif path == "/api/repo_sizes":
+            ids = query.get("ids", [""])[0]
+            repo_ids = [i.strip() for i in ids.split(",") if i.strip()][:80]
+            sizes = mlx_helper.get_repo_sizes_bulk(repo_ids) if repo_ids else {}
+            self.send_json({"sizes": sizes})
         elif path == "/api/logs":
             log_files = []
             if os.path.exists(LOG_DIR):
@@ -602,7 +611,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.4 (Vision & Text)</title>
+  <title>macOS MLX Control Center v0.5 (Vision & Text)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1043,7 +1052,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.4 (Vision & Text)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.5 (Vision & Text)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
@@ -1175,10 +1184,27 @@ INDEX_HTML = """<!DOCTYPE html>
           <option value="downloads">Most Downloads</option>
           <option value="likes">Most Liked</option>
           <option value="lastModified">Recently Updated</option>
+          <option value="size_asc">Smallest RAM First</option>
+          <option value="size_desc">Largest RAM First</option>
         </select>
         <select id="limitSelect" onchange="doSearch()" style="padding: 6px 12px !important; font-size: 12px !important;">
           <option value="50">50 Results</option>
           <option value="100">100 Results</option>
+        </select>
+        <span style="font-size: 12px; color: var(--text-muted); margin-left: 4px;">RAM Budget:</span>
+        <select id="ramSelect" onchange="renderSearchCards(currentSearchQuery)" title="Only show models that fit within this much RAM"
+                style="padding: 6px 12px !important; font-size: 12px !important; border-color: rgba(99, 102, 241, 0.55); background: rgba(99, 102, 241, 0.12); font-weight: 600;">
+          <option value="auto">🖥️ Fits My Mac (auto)</option>
+          <option value="0">Any Size</option>
+          <option value="8">≤ 8 GB</option>
+          <option value="16">≤ 16 GB</option>
+          <option value="24">≤ 24 GB</option>
+          <option value="32">≤ 32 GB</option>
+          <option value="48">≤ 48 GB</option>
+          <option value="64">≤ 64 GB</option>
+          <option value="96">≤ 96 GB</option>
+          <option value="128">≤ 128 GB</option>
+          <option value="192">≤ 192 GB</option>
         </select>
         <div class="view-toggle-group">
           <button class="view-toggle-btn active" data-view="grid" onclick="setViewMode('grid')" title="Card Grid View">
@@ -1597,6 +1623,11 @@ INDEX_HTML = """<!DOCTYPE html>
     let targetModelForLaunch = '';
     let currentFilter = 'mlx';
     let currentFreeRam = 16.0;
+    let currentUsableRam = 16.0;
+    let currentTotalRam = 0;
+    let searchResults = [];
+    let searchSeq = 0;
+    let currentSearchQuery = '';
     let selectedForCompare = new Set();
     let globalConfig = { default_port: 9999, default_host: '127.0.0.1', default_temp: 0.0, default_max_tokens: 4096, auto_sync_agents: true };
     let currentViewMode = localStorage.getItem('mlx_view_mode') || 'grid';
@@ -1991,6 +2022,11 @@ INDEX_HTML = """<!DOCTYPE html>
 
         const stats = data.stats || {};
         if (stats.free_ram_gb) currentFreeRam = stats.free_ram_gb;
+        if (stats.usable_ram_gb) {
+          currentUsableRam = stats.usable_ram_gb;
+          currentTotalRam = stats.total_ram_gb || currentTotalRam;
+          syncRamBudgetLabel();
+        }
 
         if (stats.total_ram_gb) {
           document.getElementById('htopRamVal').innerText = stats.used_ram_gb + ' / ' + stats.total_ram_gb + ' GB (' + stats.ram_percent + '%)';
@@ -2096,13 +2132,20 @@ INDEX_HTML = """<!DOCTYPE html>
       }
     }
 
-    function getRamBadge(estGb, freeGb) {
-      if (estGb <= freeGb * 0.8) {
-        return `<span class="ram-badge fit">🟢 Fits Smoothly (Est: ${estGb} GB RAM)</span>`;
-      } else if (estGb <= freeGb) {
-        return `<span class="ram-badge warn">🟡 High RAM Pressure (Est: ${estGb} GB RAM)</span>`;
+    function getRamBadge(estGb, budgetGb, sizeKnown, sizePending) {
+      const budget = Number(budgetGb) || Number(currentUsableRam) || 0;
+      if (!estGb) {
+        const txt = sizePending ? '⏳ Checking size…' : '❔ Size unknown';
+        return `<span class="ram-badge" style="background: rgba(255,255,255,0.06); color: var(--text-muted); border-color: rgba(255,255,255,0.15);">${txt}</span>`;
+      }
+      const est = Number(estGb).toFixed(1);
+      const approx = sizeKnown ? '' : ' approx';
+      if (budget && estGb <= budget * 0.8) {
+        return `<span class="ram-badge fit">🟢 Fits Smoothly (${est} GB RAM${approx})</span>`;
+      } else if (budget && estGb <= budget) {
+        return `<span class="ram-badge warn">🟡 Tight Fit (${est} GB RAM${approx})</span>`;
       } else {
-        return `<span class="ram-badge heavy">🔴 Excess RAM Needed (Est: ${estGb} GB RAM)</span>`;
+        return `<span class="ram-badge heavy">🔴 Too Large (${est} GB > ${budget} GB usable${approx})</span>`;
       }
     }
 
@@ -2131,7 +2174,7 @@ INDEX_HTML = """<!DOCTYPE html>
         let badgeColor = m.is_vision ? '#a855f7' : (m.supported ? '#6366f1' : '#f59e0b');
         const tagBadge = m.arch_tag ? `<span style="font-size:11px; padding: 2px 8px; border-radius: 12px; background: rgba(255,255,255,0.08); color: ${badgeColor}; margin-left: 6px;">${m.arch_tag}</span>` : '';
         const visionBadge = m.is_vision ? `<span class="ram-badge fit" style="background: rgba(168, 85, 247, 0.2); color: #d8b4fe; border-color: rgba(168, 85, 247, 0.4);">👁️ Vision Ready</span>` : '';
-        const ramBadge = getRamBadge(m.size_gb || 6.0, currentFreeRam);
+        const ramBadge = getRamBadge(m.size_gb ? (m.size_gb * 1.08 + 2.0) : 0, currentUsableRam, true);
         const isChecked = selectedForCompare.has(m.name) ? 'checked' : '';
         const hfUrl = m.base_name ? `https://huggingface.co/${m.base_name}${m.subfolder ? '/tree/main/' + m.subfolder : ''}` : `https://huggingface.co/${m.name}`;
 
@@ -2218,6 +2261,7 @@ INDEX_HTML = """<!DOCTYPE html>
       const limit = document.getElementById('limitSelect').value || '50';
       const resultsGrid = document.getElementById('searchResultsGrid');
       const metaHeader = document.getElementById('searchMetaHeader');
+      currentSearchQuery = query;
 
       resultsGrid.innerHTML = '<div style="color: var(--text-muted);">Searching Hugging Face repositories...</div>';
 
@@ -2271,22 +2315,100 @@ INDEX_HTML = """<!DOCTYPE html>
 
       const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&sort=${sort}&limit=${limit}&filter=${currentFilter}`);
       const data = await res.json();
-      const results = data.results || [];
       currentFreeRam = data.free_ram_gb || currentFreeRam;
+      if (data.usable_ram_gb) {
+        currentUsableRam = data.usable_ram_gb;
+        currentTotalRam = data.total_ram_gb || currentTotalRam;
+        syncRamBudgetLabel();
+      }
+      searchResults = data.results || [];
+      searchSeq += 1;
+      const mySeq = searchSeq;
 
-      metaHeader.innerText = `Showing ${results.length} model repositories for '${query}' (Filter: ${currentFilter.toUpperCase()} | Free RAM: ${currentFreeRam} GB)`;
+      renderSearchCards(query);
+
+      // Phase 2: real Hugging Face weight sizes + exact parameter counts (cached after first run)
+      const unknown = searchResults.filter(r => !r.size_known).map(r => r.id);
+      if (!unknown.length) return;
+      try {
+        const sizeRes = await fetch(`/api/repo_sizes?ids=${encodeURIComponent(unknown.join(','))}`);
+        const sizeData = await sizeRes.json();
+        if (mySeq !== searchSeq) return; // a newer search superseded this one
+        const sizes = sizeData.sizes || {};
+        searchResults.forEach(r => {
+          const info = sizes[r.id];
+          if (!info) return;
+          r.weights_gb = info.weights_gb || 0;
+          r.params_b = info.params_b;
+          r.quant = info.quant || '';
+          r.est_ram_gb = info.est_ram_gb || r.est_ram_gb;
+          r.size_known = !!info.weights_gb;
+        });
+        renderSearchCards(query);
+      } catch (e) {
+        console.error(e);
+        if (mySeq === searchSeq) {
+          searchResults.forEach(r => { if (!r.size_known) r.size_failed = true; });
+          renderSearchCards(query);
+        }
+      }
+    }
+
+    function syncRamBudgetLabel() {
+      const sel = document.getElementById('ramSelect');
+      if (!sel) return;
+      const auto = sel.querySelector('option[value="auto"]');
+      if (auto && currentUsableRam) {
+        auto.innerText = `🖥️ Fits My Mac (${currentUsableRam} GB usable)`;
+      }
+    }
+
+    function getRamBudget() {
+      const sel = document.getElementById('ramSelect');
+      if (!sel) return 0;
+      if (sel.value === 'auto') return currentUsableRam || 0;
+      return parseFloat(sel.value) || 0;
+    }
+
+    function renderSearchCards(query) {
+      const resultsGrid = document.getElementById('searchResultsGrid');
+      const metaHeader = document.getElementById('searchMetaHeader');
+      const budget = getRamBudget();
+
+      let shown = searchResults.filter(r => !budget || !r.est_ram_gb || r.est_ram_gb <= budget);
+      const sortMode = document.getElementById('sortSelect').value;
+      if (sortMode === 'size_asc') shown = shown.slice().sort((a, b) => (a.est_ram_gb || 1e9) - (b.est_ram_gb || 1e9));
+      if (sortMode === 'size_desc') shown = shown.slice().sort((a, b) => (b.est_ram_gb || 0) - (a.est_ram_gb || 0));
+
+      const budgetTxt = budget ? `RAM budget: ${budget} GB` : 'RAM budget: any';
+      metaHeader.innerText = `Showing ${shown.length} of ${searchResults.length} repos for '${query}' (Filter: ${currentFilter.toUpperCase()} | ${budgetTxt}${currentTotalRam ? ' of ' + currentTotalRam + ' GB total' : ''})`;
       resultsGrid.innerHTML = '';
 
-      if (results.length === 0) {
-        resultsGrid.innerHTML = `<div class="card" style="grid-column: 1 / -1; text-align: center; color: var(--text-muted);">No models found for '${query}'. Try relaxing filters or typing 'mlx'.</div>`;
+      if (shown.length === 0) {
+        resultsGrid.innerHTML = `<div class="card" style="grid-column: 1 / -1; text-align: center; color: var(--text-muted); padding: 24px;">No models match '${query}' within ${budget} GB RAM. Try increasing the RAM budget or a different search.</div>`;
+        applyViewMode();
         return;
       }
 
-      results.forEach(r => {
-        const ramBadge = getRamBadge(r.est_ram_gb, currentFreeRam);
+      shown.forEach(r => {
+        const ramBadge = getRamBadge(r.est_ram_gb, budget || currentUsableRam, r.size_known, !r.size_known && !r.size_failed);
         const tagsHtml = (r.tags || []).map(t => `<span style="font-size:10px; padding:2px 6px; border-radius:4px; background:rgba(255,255,255,0.06); color:var(--text-muted); margin-right:4px;">${t}</span>`).join('');
         const isChecked = selectedForCompare.has(r.id) ? 'checked' : '';
         const hfUrl = `https://huggingface.co/${r.id}`;
+
+        const sizeBits = [];
+        if (r.weights_gb) {
+          const w = r.weights_gb >= 100 ? Math.round(r.weights_gb) : Math.round(r.weights_gb * 10) / 10;
+          sizeBits.push(`💾 ${w} GB weights`);
+        }
+        if (r.params_b) {
+          const pb = r.params_b >= 10 ? Math.round(r.params_b) : Math.round(r.params_b * 10) / 10;
+          sizeBits.push(`🧮 ${pb}B params`);
+        }
+        if (r.quant) sizeBits.push(`🎯 ${r.quant}`);
+        const sizeHtml = sizeBits.length
+          ? sizeBits.map(s => `<span>${s}</span>`).join('')
+          : `<span style="opacity:0.6;">💾 size unknown</span>`;
 
         resultsGrid.innerHTML += `
           <div class="card">
@@ -2299,6 +2421,7 @@ INDEX_HTML = """<!DOCTYPE html>
                 </label>
               </div>
               <div class="card-meta">
+                <div style="display: inline-flex; flex-wrap: wrap; gap: 10px; width: 100%;">${sizeHtml}</div>
                 <span>⬇️ <strong style="color: #f3f4f6;">${r.downloads.toLocaleString()}</strong></span>
                 <span>❤️ <strong style="color: #f3f4f6;">${r.likes}</strong></span>
                 <span>🕒 <strong style="color: #f3f4f6;">${r.lastModified || 'Recent'}</strong></span>

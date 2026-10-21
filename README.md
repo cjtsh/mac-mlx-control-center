@@ -1,5 +1,5 @@
 
-# ⚡ macOS MLX Control Center `v0.4` (Vision & Multimodal Edition)
+# ⚡ macOS MLX Control Center `v0.5` (Vision, Multimodal & Accurate RAM Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -78,9 +78,32 @@ Prefer working in the terminal? You can also use `mlx.sh` directly:
 
 ### Key CLI Commands:
 * `./mlx.sh list`: View all downloaded local models and RAM sizes.
-* `./mlx.sh search <query>`: Search Hugging Face repositories directly from terminal.
+* `./mlx.sh search <query> [ram_gb]`: Search Hugging Face repositories directly from terminal (e.g. `./mlx.sh search qwen 32` shows only models that fit in 32 GB; prompts for a budget when omitted).
 * `./mlx.sh start`: Interactive launcher with Fast Swap and Concurrent port options.
 * `./mlx.sh stop`: Emergency kill-switch for running servers.
+
+---
+
+## 🧠 Accurate RAM Estimates & RAM Budget Filter (New in v0.5)
+
+Search cards now show **real numbers fetched from Hugging Face** instead of guessing from the repository name:
+
+* **Weight size** — summed from the repo's `safetensors` blobs (picks the largest quant subfolder when a repo ships several).
+* **Parameter count** — read from `safetensors.total` in the HF API, falling back to parsing the name (`7B`, `8x7B`, `350m`).
+* **RAM estimate** — `weights × 1.06` (activations) `+ KV cache` (`params × 0.02 GB`, clamped 0.75–8 GB) `+ 1.5 GB` runtime overhead.
+
+> **Why this matters:** previously any repo with `4bit` in its name matched the `"4b"` substring and was rated as a 4-billion-parameter model (≈3.2 GB). A 180B-parameter `Qwen3.8-Flash-Next-4bit` with **106 GB of weights** showed a green "Fits Smoothly (Est: 6 GB RAM)" badge — it would never load on a Mac.
+
+### RAM Budget dropdown
+The search bar has a new **RAM Budget** selector:
+
+* **`🖥️ Fits My Mac (auto)`** — uses *usable RAM* = total unified memory − `max(4 GB, 12%)` reserved for macOS (e.g. **112.6 GB** on a 128 GB Mac).
+* **`8 … 192 GB`** — only list models whose estimated RAM fits that ceiling.
+* **`Any Size`** — no filtering (sizes and fit badges are still shown).
+
+Badges are computed against the current budget: 🟢 **Fits Smoothly** (≤ 80%), 🟡 **Tight Fit** (≤ 100%), 🔴 **Too Large** (shows required vs. usable RAM). Sort by **Smallest / Largest RAM First** to find the right size instantly.
+
+Sizes are fetched in a fast second pass (`/api/repo_sizes`) and cached, so repeat searches are instant.
 
 ---
 
