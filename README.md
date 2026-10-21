@@ -1,5 +1,5 @@
 
-# ⚡ macOS MLX Control Center `v0.8.6` (Fast Parallel Downloads Edition)
+# ⚡ macOS MLX Control Center `v0.8.7` (Auto Context Windows Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -41,6 +41,7 @@ Most local LLM runners are either overly complex, hog system menubars, or requir
 * 📦 **Serves from your drive (v0.8.5)**: repo-id requests reuse the weights already on the external drive (`HF_HUB_CACHE` is pointed at the library) instead of silently re-downloading into `~/.cache`.
 * 🔄 **One-Click Harness Sync (v0.8.4)**: every installed model is written into your DeepSeek Harness `mlx-local` provider by a single button (or `./mlx.sh sync-harness`) — no hand-editing YAML, no retyping repo ids.
 * ⚡ **Fast, Resumable Downloads + Optional HF Login (v0.8.0)**: Large models now download over **8 parallel HTTPS range requests** instead of one throttled stream (measured on this line: 74 KB/s single connection → **2.2 MB/s** with 8), with byte-accurate progress, real MB/s, ETA, a **90-second stall watchdog** that restarts dead transfers automatically, and a **"🤗 Sign in" button** that uses HF's device flow so each user authorises *their own* account — the token goes into the macOS Keychain, never into this repo.
+* 🧠 **Auto Context Windows (v0.8.7)**: every model reports its own native window (read from `config.json`), the dashboard shows it on the card, and servers are started with a RAM-safe `--max-kv-size`. No hand-math.
 * 💾 **Multi-Drive Model Libraries (v0.7)**: Every writable APFS/HFS+ drive is discovered automatically and each one becomes a model library at `<drive>/MLX-Models/hub`. Pick a **Download to:** drive in the toolbar or per model with the **💾 Save to…** button, keep 70–100 GB models off your boot SSD (pick a drive, confirm, then it downloads), and see a live per-drive inventory (models, free space, offline drives) on the Downloaded Models tab. Includes a free-space guard, absolute-path launching, and the `./mlx.sh drives` / `./mlx.sh use-drive` / `./mlx.sh download <repo> --to <drive>` CLI. Add `--turbo` to force parallel mode, or `--no-turbo` to use the plain client.
 * 🎛️ **Combinable Search Filters + Any-Bit Quant (v0.6)**: The `⚡ MLX Models`, `👁️ Vision & Multimodal` and `💻 Code Models` chips are independent toggles that combine with AND, and a new **Quant** dropdown filters by **2, 3, 4, 5, 6, 8 or 16-bit** (instead of 4-bit only). Stack them with the RAM budget: *"MLX + Code + 8-bit + Fits My Mac"* in three clicks.
 * 🧠 **Accurate RAM Estimates & RAM Budget Filter (v0.5)**: Search cards now show real weight sizes and parameter counts pulled from Hugging Face (`safetensors` blobs + `safetensors.total`) and estimate RAM as `weights × 1.06 + KV cache + 1.5 GB`. A new **RAM Budget** dropdown (Fits My Mac / 8–192 GB / Any Size) hides models that can't run on your Mac, with 🟢/🟡/🔴 fit badges and Smallest/Largest RAM sorting.
@@ -151,6 +152,31 @@ Measured on the 73.5 GB REAP-288 model, started from the external drive:
 | Internal cache growth | 1.1 GB and climbing | 0 bytes |
 
 Servers are also **launched by repo id** now (not by absolute path), so the id the client sends already matches the loaded model. Launching by path meant `mlx-vlm` saw "a different model" and unloaded/reloaded 73 GB on the first request of every session.
+
+## 🧠 Auto Context Windows (New in v0.8.7)
+
+Every model has its own conversation limit, and guessing it wastes memory or truncates silently. The dashboard now reads each model's `config.json` and works out three numbers:
+
+| Number | Where it comes from |
+|---|---|
+| **Native window** | `text_config.max_position_embeddings` (or `max_seq_len`, `n_positions`, `model_max_length`) |
+| **KV cost per token** | `2 × kv_heads × head_dim × 2 bytes × full_attention_layers` — hybrid models with linear-attention layers keep KV for only the full-attention ones |
+| **RAM-safe ceiling** | `(total_RAM × 0.85 − weights − 3 GB) ÷ KV_cost_per_token`, rounded down to 8K steps |
+
+The recommended window is `min(native, RAM-safe)` — normally just the native window, because KV cache is cheap next to weights:
+
+| Model | Native | KV/token | Weights | RAM left for KV | Recommended |
+|---|---|---|---|---|---|
+| Qwen3.8-Flash-Next-REAP-288-4bit | 262,144 | 24 KB | 73.5 GB | 32.3 GB | **262,144** (native) |
+| gemma-4-E4B-it-MLX-4bit | 131,072 | 14 KB | 6.8 GB | 99.0 GB | **131,072** (native) |
+| Qwen2.5-1.5B-Instruct-4bit | 32,768 | 28 KB | 0.9 GB | 104.9 GB | **32,768** (native) |
+
+**Where it lands:**
+
+* model cards show `🧠 Context: 256K tokens`
+* `Settings → Context Window` is **Auto** by default (per-model native); pick 32K/64K/128K/256K to force a cheaper cap — it is applied as `--max-kv-size` and can never exceed the model's own maximum
+* `./mlx.sh sync-harness` writes `contextWindow` + `maxTokens` into the DeepSeek Harness profile, so the harness compresses at the right point instead of assuming 200K
+* hand-edited capacity values in the harness profile are preserved across syncs
 
 ## 🔄 Sync Installed Models into DeepSeek Harness (New in v0.8.4)
 

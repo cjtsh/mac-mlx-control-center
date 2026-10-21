@@ -149,7 +149,9 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             self.send_json(config)
         elif path == "/api/models":
             models = mlx_helper.find_local_models()
-            self.send_json({"models": models})
+            for m in models:
+                m["context_window"] = mlx_helper.model_context_window(m.get("path") or m.get("name") or "")
+            self.send_json({"models": models, "context_cap": mlx_helper.context_window_cap()})
         elif path == "/api/memory_processes":
             stats = mlx_helper.get_system_stats()
             procs = mlx_helper.get_top_memory_processes(limit=40)
@@ -250,6 +252,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             if "default_host" in payload: st["default_host"] = str(payload["default_host"])
             if "default_temp" in payload: st["default_temp"] = float(payload["default_temp"])
             if "default_max_tokens" in payload: st["default_max_tokens"] = int(payload["default_max_tokens"])
+            if "default_context_window" in payload: st["default_context_window"] = int(payload["default_context_window"])
             if "auto_sync_agents" in payload: st["auto_sync_agents"] = bool(payload["auto_sync_agents"])
             
             mlx_helper.save_global_settings(st)
@@ -337,7 +340,8 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
 
             if mode == "concurrent":
                 port = mlx_helper.find_free_port(10000)
-            elif not port or mode == "swap":
+            elif not port:
+                # an explicit port from the Launch dialog wins; otherwise use the default
                 port = default_p
 
             try:
@@ -377,7 +381,15 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                                             and not os.path.isabs(model_name)) else model_path)
 
             extra_args = []
+            ctx_cap = mlx_helper.context_window_cap()
+            native_ctx = mlx_helper.model_context_window(model_name) or mlx_helper.model_context_window(model_path)
+            if ctx_cap and native_ctx:
+                ctx_cap = min(ctx_cap, native_ctx)
+            elif ctx_cap and not native_ctx:
+                ctx_cap = 0  # unknown native size: do not guess a hard limit
             if use_engine == "mlx-vlm":
+                if ctx_cap:
+                    extra_args.extend(["--max-kv-size", str(ctx_cap)])
                 if thinking:
                     extra_args.append("--enable-thinking")
                 if draft_model:
@@ -773,7 +785,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.8.6 (Fast Downloads)</title>
+  <title>macOS MLX Control Center v0.8.7 (Auto Context)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1214,7 +1226,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.8.6 (Fast Downloads)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.8.7 (Auto Context)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
@@ -1656,6 +1668,18 @@ INDEX_HTML = """<!DOCTYPE html>
         </div>
       </div>
 
+      <div style="margin-bottom: 16px;">
+        <label style="display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; color: var(--text-muted);">Context Window (KV cache cap):</label>
+        <select id="cfgContextSelect" style="width: 100%;" onchange="renderContextNote()">
+          <option value="0">Auto — use each model's native maximum</option>
+          <option value="32768">32K tokens</option>
+          <option value="65536">64K tokens</option>
+          <option value="131072">128K tokens</option>
+          <option value="262144">256K tokens</option>
+        </select>
+        <div id="cfgContextNote" style="font-size: 10px; color: #64748b; margin-top: 6px; line-height: 1.5;"></div>
+      </div>
+
       <!-- RICH TOOLTIP & RAM GUIDANCE CARD -->
       <div style="background: rgba(0,0,0,0.35); border: 1px solid var(--card-border); border-radius: 10px; padding: 14px; margin-bottom: 16px; font-size: 12px; color: #94a3b8; line-height: 1.5;">
         <strong style="color: #60a5fa; font-size: 13px;">💡 What is "Max Output Tokens"?</strong><br>
@@ -1878,7 +1902,8 @@ INDEX_HTML = """<!DOCTYPE html>
     let searchSeq = 0;
     let currentSearchQuery = '';
     let selectedForCompare = new Set();
-    let globalConfig = { default_port: 9999, default_host: '127.0.0.1', default_temp: 0.0, default_max_tokens: 4096, auto_sync_agents: true };
+    let mlxModelsCache = [];
+    let globalConfig = { default_context_window: 0, default_port: 9999, default_host: '127.0.0.1', default_temp: 0.0, default_max_tokens: 4096, auto_sync_agents: true };
     let currentViewMode = localStorage.getItem('mlx_view_mode') || 'grid';
 
     // ---- Model storage: drives are discovered from the mount table, never configured ----
@@ -2519,6 +2544,25 @@ INDEX_HTML = """<!DOCTYPE html>
       }
     }
 
+    function renderContextNote() {
+      const note = document.getElementById('cfgContextNote');
+      if (!note) return;
+      const big = mlxModelsCache
+        .map(m => ({ name: (m.repo_id || m.name || '').split('/').pop(), ctx: m.context_window || 0 }))
+        .filter(x => x.ctx)
+        .sort((a, b) => b.ctx - a.ctx);
+      if (!big.length) {
+        note.innerText = 'Each model\\'s native context is read from its config.json when it starts.';
+        return;
+      }
+      const top = big[0];
+      const sel = parseInt(document.getElementById('cfgContextSelect')?.value || '0') || 0;
+      const eff = sel ? Math.min(sel, top.ctx) : top.ctx;
+      note.innerText = `Largest installed model (${top.name}) supports ${top.ctx.toLocaleString()} tokens — ` +
+        (sel ? `this cap starts servers with ${eff.toLocaleString()} and hands the same number to DeepSeek Harness.`
+             : 'no cap, so servers and Harness use that number.');
+    }
+
     async function loadHarnessState() {
       const note = document.getElementById('harnessSyncNote');
       try {
@@ -2568,6 +2612,9 @@ INDEX_HTML = """<!DOCTYPE html>
       document.getElementById('cfgHostSelect').value = globalConfig.default_host || '127.0.0.1';
       document.getElementById('cfgTempInput').value = globalConfig.default_temp || 0.0;
       document.getElementById('cfgMaxTokensInput').value = globalConfig.default_max_tokens || 4096;
+      const ctxSel = document.getElementById('cfgContextSelect');
+      if (ctxSel) ctxSel.value = String(globalConfig.default_context_window || 0);
+      renderContextNote();
       document.getElementById('cfgAutoSyncCheck').checked = globalConfig.auto_sync_agents !== false;
       renderTokenGuide();
       loadHarnessState();
@@ -2588,7 +2635,7 @@ INDEX_HTML = """<!DOCTYPE html>
       await fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ default_port: port, default_host: host, default_temp: temp, default_max_tokens: maxTokens, auto_sync_agents: autoSync })
+        body: JSON.stringify({ default_port: port, default_host: host, default_temp: temp, default_max_tokens: maxTokens, default_context_window: parseInt(document.getElementById('cfgContextSelect')?.value || '0') || 0, auto_sync_agents: autoSync })
       });
 
       closeConfigModal();
@@ -2913,6 +2960,7 @@ INDEX_HTML = """<!DOCTYPE html>
               </div>
               <div class="card-meta">
                 <span>📦 Size: <strong style="color: #f3f4f6;">${m.size}</strong></span>
+                ${m.context_window ? `<span>🧠 Context: <strong style="color: #f3f4f6;">${Math.round(m.context_window / 1024)}K tokens</strong></span>` : ''}
                 ${m.date_added ? `<span>📅 Added: <strong style="color: #f3f4f6;">${m.date_added}</strong></span>` : ''}
               </div>
             </div>
@@ -2940,6 +2988,7 @@ INDEX_HTML = """<!DOCTYPE html>
               </div>
               <div class="card-meta">
                 <span>📦 Size: <strong style="color: #f3f4f6;">${m.size}</strong></span>
+                ${m.context_window ? `<span>🧠 Context: <strong style="color: #f3f4f6;">${Math.round(m.context_window / 1024)}K tokens</strong></span>` : ''}
                 ${m.drive_name ? `<span>${m.drive_id ? '💾' : '🧠'} Drive: <strong style="color: #34d399;">${m.drive_name}</strong></span>` : ''}
                 ${m.date_added ? `<span>📅 Added: <strong style="color: #f3f4f6;">${m.date_added}</strong></span>` : ''}
                 <span class="path-meta" title="${m.path}">📁 <span style="opacity: 0.85;">${m.path}</span></span>
@@ -2961,6 +3010,7 @@ INDEX_HTML = """<!DOCTYPE html>
         const res = await fetch('/api/models');
         const data = await res.json();
         cachedDownloadedModels = data.models || [];
+        mlxModelsCache = cachedDownloadedModels;
         syncSortDropdowns();
         renderModelGrids();
       } catch (e) {

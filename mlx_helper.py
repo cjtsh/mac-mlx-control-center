@@ -20,6 +20,7 @@ WEIGHT_FILE_EXTS = (".safetensors", ".gguf", ".bin", ".pt", ".pth", ".npz", ".h5
 
 def load_global_settings():
     default_settings = {
+        "default_context_window": 0,
         "default_port": 9999,
         "default_host": "127.0.0.1",
         "default_temp": 0.0,
@@ -738,6 +739,10 @@ def _format_dsh_models(entries):
     for e in entries:
         lines.append("          - id: " + _yaml_quote(e["id"]))
         lines.append("            name: " + _yaml_quote(e["name"]))
+        for extra in e.get("extra") or []:
+            if extra.split(":")[0].strip() in ("id", "name"):
+                continue
+            lines.append("            " + extra)
     return lines
 
 def read_dsh_models(provider_id=DSH_PROVIDER_ID, patch_path=None):
@@ -769,11 +774,14 @@ def read_dsh_models(provider_id=DSH_PROVIDER_ID, patch_path=None):
                 break
             m = re.match(r"^ {10,}- id: (.+)$", line)
             if m:
-                entries.append({"id": m.group(1).strip().strip('"').strip("'"), "name": ""})
+                entries.append({"id": m.group(1).strip().strip('"').strip("'"), "name": "", "extra": []})
             else:
                 m = re.match(r"^ {12,}name: (.+)$", line)
                 if m and entries:
                     entries[-1]["name"] = m.group(1).strip().strip('"').strip("'")
+                elif entries and re.match(r"^ {12,}\S", line):
+                    # keep capacity hints such as contextWindow / maxTokens
+                    entries[-1].setdefault("extra", []).append(line.strip())
     return {"ok": True, "patch": path, "provider": provider_id, "entries": entries}
 
 def sync_dsh_models(provider_id=DSH_PROVIDER_ID, patch_path=None, models=None, dry_run=False):
@@ -788,7 +796,8 @@ def sync_dsh_models(provider_id=DSH_PROVIDER_ID, patch_path=None, models=None, d
     if models is None:
         # name=None keeps any hand-written label already in the patch file
         models = [{"id": m.get("repo_id") or m.get("name"), "name": None} for m in find_local_models()]
-    existing = {e["id"]: e.get("name") or "" for e in read_dsh_models(provider_id, path).get("entries", [])}
+    prior = {e["id"]: e for e in read_dsh_models(provider_id, path).get("entries", [])}
+    existing = {k: (v.get("name") or "") for k, v in prior.items()}
     seen, entries = set(), []
     for m in models:
         rid = (m.get("id") or "").strip()
@@ -796,7 +805,22 @@ def sync_dsh_models(provider_id=DSH_PROVIDER_ID, patch_path=None, models=None, d
             continue
         seen.add(rid)
         label = (m.get("name") or existing.get(rid) or dsh_model_label(rid)).strip()
-        entries.append({"id": rid, "name": label})
+        extra = list((prior.get(rid) or {}).get("extra") or [])
+        have = {line.split(":")[0].strip() for line in extra}
+        cap = context_window_cap()
+        ctx = cap if cap else (model_context_profile(rid).get("recommended") or model_context_window(rid))
+        native = model_context_window(rid)
+        if ctx and native:
+            ctx = min(ctx, native)
+        if ctx and "contextWindow" not in have:
+            extra.append("contextWindow: %d" % ctx)
+        if "maxTokens" not in have:
+            try:
+                out_tokens = int(load_global_settings().get("default_max_tokens", 4096) or 4096)
+            except Exception:
+                out_tokens = 4096
+            extra.append("maxTokens: %d" % out_tokens)
+        entries.append({"id": rid, "name": label, "extra": extra})
     entries.sort(key=lambda e: e["id"].lower())
     raw = open(path).read().splitlines()
     prov_re = re.compile(r"^ {6}" + re.escape(provider_id) + r":\s*$")
@@ -850,6 +874,170 @@ def sync_dsh_models(provider_id=DSH_PROVIDER_ID, patch_path=None, models=None, d
 
 def repo_cache_dirname(repo_id):
     return "models--" + str(repo_id).replace("/", "--")
+
+def model_context_window(model_name_or_path):
+    """Read the model's native context length (tokens) from its own config.json.
+
+    mlx-vlm accepts `--max-kv-size <tokens>`; without a declared capacity the dashboards
+    and client apps fall back to guesses (DeepSeek Harness assumes 200k), so we read the
+    real number instead of inventing one.
+    """
+    name = (model_name_or_path or "").strip().rstrip("/")
+    if not name:
+        return 0
+    candidates = []
+    if os.path.isdir(name):
+        candidates.append(name)
+    else:
+        hub = hub_for_model(name)
+        if hub and "/" in name:
+            base = os.path.join(hub, repo_cache_dirname(name))
+            refs = os.path.join(base, "refs", "main")
+            rev = ""
+            try:
+                rev = open(refs).read().strip()
+            except Exception:
+                rev = ""
+            for snap in ([os.path.join(base, "snapshots", rev)] if rev else []):
+                candidates.append(snap)
+            snaps = os.path.join(base, "snapshots")
+            if os.path.isdir(snaps):
+                for entry in sorted(os.listdir(snaps)):
+                    candidates.append(os.path.join(snaps, entry))
+    for cand in candidates:
+        cfg_path = os.path.join(cand, "config.json")
+        if not os.path.isfile(cfg_path):
+            continue
+        try:
+            cfg = json.load(open(cfg_path))
+        except Exception:
+            continue
+        for holder in (cfg.get("text_config") or {}, cfg):
+            for key in ("max_position_embeddings", "max_seq_len", "seq_length",
+                        "max_sequence_length", "n_positions", "model_max_length"):
+                val = holder.get(key)
+                if isinstance(val, int) and 1024 <= val <= 4_000_000:
+                    return val
+    return 0
+
+def _snapshot_dirs(model_name_or_path):
+    """Snapshot directories we can read config.json / weights from, locally only."""
+    name = (model_name_or_path or "").strip().rstrip("/")
+    dirs = []
+    if not name:
+        return dirs
+    if os.path.isdir(name):
+        dirs.append(name)
+        return dirs
+    hub = hub_for_model(name)
+    if not hub or "/" not in name:
+        return dirs
+    base = os.path.join(hub, repo_cache_dirname(name))
+    try:
+        rev = open(os.path.join(base, "refs", "main")).read().strip()
+        if rev:
+            dirs.append(os.path.join(base, "snapshots", rev))
+    except Exception:
+        pass
+    snaps = os.path.join(base, "snapshots")
+    if os.path.isdir(snaps):
+        for entry in sorted(os.listdir(snaps), reverse=True):
+            path = os.path.join(snaps, entry)
+            if path not in dirs:
+                dirs.append(path)
+    return dirs
+
+def _weights_gb(snapshot_dir):
+    total = 0
+    try:
+        for root, _dirs, files in os.walk(snapshot_dir):
+            for fn in files:
+                if fn.endswith((".safetensors", ".gguf", ".bin")):
+                    try:
+                        total += os.path.getsize(os.path.join(root, fn))
+                    except OSError:
+                        pass
+    except Exception:
+        return 0.0
+    return round(total / 1e9, 2)
+
+def _kv_bytes_per_token(cfg):
+    """KV cache cost per token, honouring hybrid architectures (linear layers keep no KV)."""
+    text = cfg.get("text_config") or cfg
+    layers = text.get("num_hidden_layers") or cfg.get("num_hidden_layers") or 0
+    kv_heads = text.get("num_key_value_heads") or text.get("num_attention_heads") or 0
+    head_dim = text.get("head_dim")
+    if not head_dim:
+        hidden = text.get("hidden_size") or 0
+        heads = text.get("num_attention_heads") or 1
+        head_dim = hidden // heads if hidden and heads else 0
+    layer_types = text.get("layer_types") or []
+    full = sum(1 for t in layer_types if "full" in str(t) or "attention" == str(t))
+    if layer_types:
+        full_layers = full
+    else:
+        full_layers = layers
+    if not (full_layers and kv_heads and head_dim):
+        return 0
+    return 2 * kv_heads * head_dim * 2 * full_layers  # K+V, fp16
+
+def effective_context_window(model_name_or_path):
+    """What a server/harness entry should use: the user cap if set, else the RAM-safe pick."""
+    native = model_context_window(model_name_or_path)
+    cap = context_window_cap()
+    if cap:
+        return min(cap, native) if native else cap
+    profile = model_context_profile(model_name_or_path)
+    return profile.get("recommended") or native
+
+def model_context_profile(model_name_or_path):
+    """Native window, KV cost, and a RAM-safe recommendation for this machine."""
+    native = model_context_window(model_name_or_path)
+    profile = {"native": native, "kv_kb_per_token": 0.0, "weights_gb": 0.0,
+               "ram_budget_gb": 0.0, "ram_tokens": 0, "recommended": native,
+               "limited_by": "native"}
+    for snap in _snapshot_dirs(model_name_or_path):
+        cfg_path = os.path.join(snap, "config.json")
+        if not os.path.isfile(cfg_path):
+            continue
+        try:
+            cfg = json.load(open(cfg_path))
+        except Exception:
+            continue
+        kv = _kv_bytes_per_token(cfg)
+        if not kv:
+            break
+        weights = _weights_gb(snap)
+        stats = get_system_stats()
+        total_ram = stats.get("total_ram_gb") or 0
+        # keep 15 % of RAM for the OS, the app, and activation spikes
+        budget = max(0.0, total_ram * 0.85 - max(weights, profile["weights_gb"]) - 3.0)
+        ram_tokens = int(budget * 1e9 / kv) if budget else 0
+        profile.update({
+            "kv_kb_per_token": round(kv / 1024, 1),
+            "weights_gb": weights,
+            "ram_budget_gb": round(budget, 1),
+            "ram_tokens": ram_tokens,
+        })
+        if native and ram_tokens and native > ram_tokens:
+            step = 8192
+            profile["recommended"] = max(step, (ram_tokens // step) * step)
+            profile["limited_by"] = "ram"
+        else:
+            profile["recommended"] = native or ram_tokens
+            profile["limited_by"] = "native" if native else "ram"
+        break
+    if not profile["recommended"]:
+        profile["recommended"] = native or 0
+    return profile
+
+def context_window_cap():
+    """User cap from settings (0 = trust the model's own maximum)."""
+    try:
+        value = int(load_global_settings().get("default_context_window", 0) or 0)
+    except Exception:
+        value = 0
+    return max(0, value)
 
 def hub_for_model(model_name):
     """Find the library hub that already holds this repo, so the server can serve it offline.
