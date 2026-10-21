@@ -2267,17 +2267,17 @@ INDEX_HTML = """<!DOCTYPE html>
 
       // Check if user entered a direct Hugging Face URL with subfolder/tree
       if (query.includes('huggingface.co/') || query.includes('/tree/') || query.includes('/blob/')) {
-        let repoPart = query.split('huggingface.co/').pop().replace(/^\/+|\/+$/g, '');
+        let repoPart = query.split('huggingface.co/').pop().replace(/^[/]+|[/]+$/g, '');
         let subfolder = '';
         let repoId = repoPart;
         if (repoPart.includes('/tree/')) {
-          const m = repoPart.match(/^([^/]+\/[^/]+)\/tree\/[^/]+(?:\/(.+))?$/);
+          const m = repoPart.match(/^([^/]+[/][^/]+)[/]tree[/][^/]+(?:[/](.+))?$/);
           if (m) {
             repoId = m[1];
             subfolder = m[2] || '';
           }
         } else if (repoPart.includes('/blob/')) {
-          const m = repoPart.match(/^([^/]+\/[^/]+)\/blob\/[^/]+(?:\/(.+))?$/);
+          const m = repoPart.match(/^([^/]+[/][^/]+)[/]blob[/][^/]+(?:[/](.+))?$/);
           if (m) {
             repoId = m[1];
             let rest = m[2] || '';
