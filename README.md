@@ -1,5 +1,5 @@
 
-# ⚡ macOS MLX Control Center `v0.8.7` (Auto Context Windows Edition)
+# ⚡ macOS MLX Control Center `v0.8.8` (Thinking Control Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 

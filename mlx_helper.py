@@ -21,6 +21,8 @@ WEIGHT_FILE_EXTS = (".safetensors", ".gguf", ".bin", ".pt", ".pth", ".npz", ".h5
 def load_global_settings():
     default_settings = {
         "default_context_window": 0,
+        "show_thinking": False,
+        "thinking_budget": 0,
         "default_port": 9999,
         "default_host": "127.0.0.1",
         "default_temp": 0.0,

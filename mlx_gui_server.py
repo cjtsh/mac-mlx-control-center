@@ -253,6 +253,8 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             if "default_temp" in payload: st["default_temp"] = float(payload["default_temp"])
             if "default_max_tokens" in payload: st["default_max_tokens"] = int(payload["default_max_tokens"])
             if "default_context_window" in payload: st["default_context_window"] = int(payload["default_context_window"])
+            if "show_thinking" in payload: st["show_thinking"] = bool(payload["show_thinking"])
+            if "thinking_budget" in payload: st["thinking_budget"] = int(payload["thinking_budget"])
             if "auto_sync_agents" in payload: st["auto_sync_agents"] = bool(payload["auto_sync_agents"])
             
             mlx_helper.save_global_settings(st)
@@ -392,6 +394,9 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                     extra_args.extend(["--max-kv-size", str(ctx_cap)])
                 if thinking:
                     extra_args.append("--enable-thinking")
+                _tb = int(mlx_helper.load_global_settings().get("thinking_budget") or 0)
+                if _tb > 0:
+                    extra_args.extend(["--thinking-budget", str(_tb)])
                 if draft_model:
                     extra_args.extend(["--draft-model", draft_model])
                 cmd = [
@@ -752,9 +757,12 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                     content = msg.get("content", "")
                     reasoning = msg.get("reasoning", "") or msg.get("reasoning_content", "")
 
+                    _st = mlx_helper.load_global_settings()
                     full_output = ""
-                    if reasoning:
+                    if reasoning and _st.get("show_thinking"):
                         full_output += f"🧠 THINKING PROCESS:\n{reasoning}\n\n"
+                    elif reasoning:
+                        full_output += f"🔒 (model thought for {len(reasoning)} characters — hidden, see Settings)\n\n"
                     if content:
                         full_output += f"💬 RESPONSE:\n{content}"
                     elif not full_output:
@@ -785,7 +793,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.8.7 (Auto Context)</title>
+  <title>macOS MLX Control Center v0.8.8 (Thinking Control)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1226,7 +1234,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.8.7 (Auto Context)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.8.8 (Thinking Control)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
@@ -1680,6 +1688,25 @@ INDEX_HTML = """<!DOCTYPE html>
         <div id="cfgContextNote" style="font-size: 10px; color: #64748b; margin-top: 6px; line-height: 1.5;"></div>
       </div>
 
+      <div style="margin-bottom: 16px;">
+        <label style="display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; color: var(--text-muted);">Model Thinking:</label>
+        <div style="display: flex; gap: 10px; align-items: center;">
+          <select id="cfgThinkingBudget" style="flex: 1;">
+            <option value="0">Default — model decides (recommended)</option>
+            <option value="1024">Brief — cap at ~1024 thinking tokens</option>
+            <option value="4096">Standard — cap at ~4096 thinking tokens</option>
+            <option value="1">Off — thinking virtually disabled</option>
+          </select>
+          <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); white-space: nowrap; cursor: pointer;">
+            <input type="checkbox" id="cfgShowThinking" style="cursor: pointer;">
+            show text
+          </label>
+        </div>
+        <div style="font-size: 10px; color: #64748b; margin-top: 6px; line-height: 1.5;">
+          Thinking is the model's private scratch pad. It is billed like any other output token and adds latency, but it improves hard reasoning (math, code, multi-step). Measured on this Mac with Qwen3.8-REAP: default = 80 tokens / 3.1 s on an arithmetic question; budget 0 = 90 tokens / 2.5 s; thinking fully off = 288 tokens / 7.9 s because the model then narrates the reasoning in its visible answer.
+        </div>
+      </div>
+
       <!-- RICH TOOLTIP & RAM GUIDANCE CARD -->
       <div style="background: rgba(0,0,0,0.35); border: 1px solid var(--card-border); border-radius: 10px; padding: 14px; margin-bottom: 16px; font-size: 12px; color: #94a3b8; line-height: 1.5;">
         <strong style="color: #60a5fa; font-size: 13px;">💡 What is "Max Output Tokens"?</strong><br>
@@ -1903,7 +1930,7 @@ INDEX_HTML = """<!DOCTYPE html>
     let currentSearchQuery = '';
     let selectedForCompare = new Set();
     let mlxModelsCache = [];
-    let globalConfig = { default_context_window: 0, default_port: 9999, default_host: '127.0.0.1', default_temp: 0.0, default_max_tokens: 4096, auto_sync_agents: true };
+    let globalConfig = { default_context_window: 0, default_port: 9999, default_host: '127.0.0.1', default_temp: 0.0, default_max_tokens: 4096, thinking_budget: 0, show_thinking: false, auto_sync_agents: true };
     let currentViewMode = localStorage.getItem('mlx_view_mode') || 'grid';
 
     // ---- Model storage: drives are discovered from the mount table, never configured ----
@@ -2612,6 +2639,8 @@ INDEX_HTML = """<!DOCTYPE html>
       document.getElementById('cfgHostSelect').value = globalConfig.default_host || '127.0.0.1';
       document.getElementById('cfgTempInput').value = globalConfig.default_temp || 0.0;
       document.getElementById('cfgMaxTokensInput').value = globalConfig.default_max_tokens || 4096;
+      const tbSel = document.getElementById('cfgThinkingBudget'); if (tbSel) tbSel.value = String(globalConfig.thinking_budget || 0);
+      const stChk = document.getElementById('cfgShowThinking'); if (stChk) stChk.checked = !!globalConfig.show_thinking;
       const ctxSel = document.getElementById('cfgContextSelect');
       if (ctxSel) ctxSel.value = String(globalConfig.default_context_window || 0);
       renderContextNote();
@@ -2635,7 +2664,7 @@ INDEX_HTML = """<!DOCTYPE html>
       await fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ default_port: port, default_host: host, default_temp: temp, default_max_tokens: maxTokens, default_context_window: parseInt(document.getElementById('cfgContextSelect')?.value || '0') || 0, auto_sync_agents: autoSync })
+        body: JSON.stringify({ default_port: port, default_host: host, default_temp: temp, default_max_tokens: maxTokens, default_context_window: parseInt(document.getElementById('cfgContextSelect')?.value || '0') || 0, thinking_budget: parseInt(document.getElementById('cfgThinkingBudget')?.value || '0') || 0, show_thinking: !!document.getElementById('cfgShowThinking')?.checked, auto_sync_agents: autoSync })
       });
 
       closeConfigModal();
