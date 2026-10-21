@@ -1,5 +1,5 @@
 
-# ⚡ macOS MLX Control Center `v0.7.2` (Multi-Drive Model Libraries Edition)
+# ⚡ macOS MLX Control Center `v0.8.0` (Fast Parallel Downloads Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -38,7 +38,8 @@ curl -sSL https://raw.githubusercontent.com/cjtsh/mac-mlx-control-center/main/in
 
 Most local LLM runners are either overly complex, hog system menubars, or require manual hand-editing of configuration JSON files for coding tools. **macOS MLX Control Center** solves this with:
 
-* 💾 **Multi-Drive Model Libraries (v0.7)**: Every writable APFS/HFS+ drive is discovered automatically and each one becomes a model library at `<drive>/MLX-Models/hub`. Pick a **Download to:** drive in the toolbar or per model with the **💾 Save to…** button, keep 70–100 GB models off your boot SSD (pick a drive, confirm, then it downloads), and see a live per-drive inventory (models, free space, offline drives) on the Downloaded Models tab. Includes a free-space guard, absolute-path launching, and the `./mlx.sh drives` / `./mlx.sh use-drive` / `./mlx.sh download <repo> --to <drive>` CLI.
+* ⚡ **Fast, Resumable Downloads + Optional HF Login (v0.8.0)**: Large models now download over **8 parallel HTTPS range requests** instead of one throttled stream (measured on this line: 74 KB/s single connection → **2.2 MB/s** with 8), with byte-accurate progress, real MB/s, ETA, a **90-second stall watchdog** that restarts dead transfers automatically, and a **"🤗 Sign in" button** that uses HF's device flow so each user authorises *their own* account — the token goes into the macOS Keychain, never into this repo.
+* 💾 **Multi-Drive Model Libraries (v0.7)**: Every writable APFS/HFS+ drive is discovered automatically and each one becomes a model library at `<drive>/MLX-Models/hub`. Pick a **Download to:** drive in the toolbar or per model with the **💾 Save to…** button, keep 70–100 GB models off your boot SSD (pick a drive, confirm, then it downloads), and see a live per-drive inventory (models, free space, offline drives) on the Downloaded Models tab. Includes a free-space guard, absolute-path launching, and the `./mlx.sh drives` / `./mlx.sh use-drive` / `./mlx.sh download <repo> --to <drive>` CLI. Add `--turbo` to force parallel mode, or `--no-turbo` to use the plain client.
 * 🎛️ **Combinable Search Filters + Any-Bit Quant (v0.6)**: The `⚡ MLX Models`, `👁️ Vision & Multimodal` and `💻 Code Models` chips are independent toggles that combine with AND, and a new **Quant** dropdown filters by **2, 3, 4, 5, 6, 8 or 16-bit** (instead of 4-bit only). Stack them with the RAM budget: *"MLX + Code + 8-bit + Fits My Mac"* in three clicks.
 * 🧠 **Accurate RAM Estimates & RAM Budget Filter (v0.5)**: Search cards now show real weight sizes and parameter counts pulled from Hugging Face (`safetensors` blobs + `safetensors.total`) and estimate RAM as `weights × 1.06 + KV cache + 1.5 GB`. A new **RAM Budget** dropdown (Fits My Mac / 8–192 GB / Any Size) hides models that can't run on your Mac, with 🟢/🟡/🔴 fit badges and Smallest/Largest RAM sorting.
 * 👁️ **Vision & Multimodal Image Recognition (v0.4)**: Full native integration with `mlx-vlm`! Run Gemma 4, Qwen 2.5/3.8 VL, PaliGemma, Pixtral, LLaVA, SmolVLM, and more with full image analysis, OCR, visual question answering, and chart understanding.
@@ -85,7 +86,8 @@ Prefer working in the terminal? You can also use `mlx.sh` directly:
 * `./mlx.sh drives`: List every model-library drive (free space, model count, Time Machine state, default target).
 * `./mlx.sh protect-models`: Exclude every model library and the HF cache from Time Machine backups.
 * `./mlx.sh use-drive [name]`: Change the default download drive (`./mlx.sh use-drive NVMe`).
-* `./mlx.sh download <repo> --to <drive>`: Download straight to a specific drive (`--to` is optional; you get a drive menu instead).
+* `./mlx.sh download <repo> --to <drive> [--turbo|--no-turbo]`: Download straight to a specific drive (`--to` is optional; you get a drive menu instead). `--turbo` forces the 8-connection parallel engine, `--no-turbo` disables it.
+* `./mlx.sh login` / `./mlx.sh whoami` / `./mlx.sh logout`: Sign in to Hugging Face with the device flow (token stored in the macOS Keychain), check who you are, or remove the token.
 * `./mlx.sh start`: Interactive launcher with Fast Swap and Concurrent port options.
 * `./mlx.sh stop`: Emergency kill-switch for running servers.
 
@@ -109,6 +111,28 @@ The **Quant** dropdown accepts **2, 3, 4, 5, 6, 8 and 16-bit**. Matching uses th
 CLI equivalent: `./mlx.sh search <query> [ram_gb] [tags] [quant]`, e.g. `./mlx.sh search coder 32 mlx,code 4`.
 
 ---
+
+## ⚡ Fast, Resumable Downloads (New in v0.8.0)
+
+Downloading a 70–100 GB model used to mean watching a progress bar that lied. Three things were wrong, and v0.8.0 fixes all of them.
+
+**1. One stream is throttled to a crawl.** Measured from this machine: a single HTTPS connection to the Hub sustains **74 KB/s**, while **8 parallel range requests reach 2.2 MB/s** (16 → 1.6 MB/s, 32 → 2.4 MB/s, so the line peaks around 2.3 MB/s ≈ 19 Mbit/s). The bottleneck is per-connection shaping, not authentication and not `hf_transfer`. So for any model with LFS blobs over 256 MB, the downloader now splits each file into 8 ranges, fetches them concurrently into `blobs/<sha256>.parts/`, verifies the **sha256 published by the Hub**, and only then moves the blob into place — after which `hf download` links the snapshot instantly instead of re-downloading it.
+
+**2. Dead sockets never died.** The Hub client has no stall watchdog: when a transfer stalls, the process stays alive at 0 B/s forever. A watchdog now samples progress every 10 seconds; after **90 s with no byte growth** it kills the stuck process tree and relaunches the same command (up to **3 attempts**), then reports `STALLED` instead of pretending to download. `hf` resumes from its `.incomplete` files, so nothing is re-fetched.
+
+**3. Progress was guesswork.** Speed is now a rolling 15-second window and ETA is derived from it, updated per poll. Turbo transfers publish their own status file (`~/.mlx_pids/turbo/<id>.json`), so the dashboard shows real bytes during the parallel phase, then `FINALISING` while the hub links files.
+
+### Signing in to Hugging Face (optional, credential-free by design)
+
+This repository ships **no tokens and no client secrets**. Signing in uses HF's OAuth **device flow** with a client that is registered dynamically at runtime:
+
+```bash
+./mlx.sh login     # prints a code + https://hf.co/oauth/device link
+./mlx.sh whoami    # who am I signed in as, and where is the token stored?
+./mlx.sh logout    # remove it from this Mac
+```
+
+The GUI has the same flow behind the **🤗 Sign in** button in the header, plus a "paste a token instead" fallback for users who already have a fine-grained token. Tokens live in the **macOS Keychain** (`service: mlx-control-center`) with a `0600` file fallback at `~/.mlx_pids/secrets.json` for machines without a keychain; nothing is ever written into the repo, and every code path works anonymously — a signed-out clone still downloads public models, just slower on gated or rate-limited repos.
 
 ## 💾 Multi-Drive Model Libraries (New in v0.7)
 

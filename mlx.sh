@@ -614,6 +614,30 @@ cmd_drives() {
     list_drives_table
 }
 
+cmd_login() {
+    echo ""
+    echo "🤗 Hugging Face sign-in (device flow — no password leaves this Mac)"
+    echo ""
+    python3 "$HELPER_PY" hf_login
+    echo ""
+}
+
+cmd_logout() {
+    python3 "$HELPER_PY" hf_logout
+}
+
+cmd_whoami() {
+    python3 "$HELPER_PY" hf_auth | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if d.get('signed_in'):
+    print(f\"🤗 Signed in as {d.get('user') or 'unknown'} ({d.get('kind','token')}) — stored in {d.get('storage','keychain')}\")
+else:
+    print('Not signed in — downloads run anonymously (public repos only, lower rate limits)')
+    print('Run ./mlx.sh login to sign in with your own account.')
+"
+}
+
 cmd_protect_models() {
     python3 -c "
 import sys
@@ -837,8 +861,37 @@ print(json.dumps({'need': need, 'free': free}))
         echo ""
     fi
 
-    export HF_HUB_ENABLE_HF_TRANSFER=1
     export HF_XET_HIGH_PERFORMANCE=1
+    export HF_HUB_DOWNLOAD_TIMEOUT=30
+
+    # Signed in? Then the transfer carries a token (higher limits, gated repos).
+    local hf_token
+    hf_token=$(python3 "$HELPER_PY" hf_token 2>/dev/null || true)
+
+    # Big LFS blobs: parallel range download first, then let the hub link them up.
+    local use_turbo="${MLXCTL_TURBO:-auto}"
+    if [ "$use_turbo" = "auto" ]; then
+        if [ -n "$(python3 "$HELPER_PY" turbo_plan "$repo_id" 2>/dev/null | python3 -c "import sys,json; print('yes' if json.load(sys.stdin).get('files') else '')" 2>/dev/null)" ]; then
+            use_turbo="yes"
+        else
+            use_turbo="no"
+        fi
+    fi
+
+    if [ "$use_turbo" = "yes" ]; then
+        local tplan
+        tplan=$(python3 "$HELPER_PY" turbo_plan "$repo_id" 2>/dev/null || echo '{}')
+        local tcount tgb
+        tcount=$(echo "$tplan" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('files',[])))" 2>/dev/null || echo 0)
+        tgb=$(echo "$tplan" | python3 -c "import sys,json; print(round(json.load(sys.stdin).get('bytes',0)/1e9,1))" 2>/dev/null || echo 0)
+        echo "⚡ Turbo: $tcount large file(s), ${tgb} GB — 8 parallel connections"
+        HF_TOKEN="$hf_token" python3 "$HELPER_PY" turbo_download "$repo_id" "$hub_dir" "$repo_id" "$subfolder" "${revision:-main}"
+        echo ""
+        echo "✓ Download process completed for '$display_name'."
+        echo ""
+        read -r -p "Press Enter to continue..."
+        return
+    fi
 
     local dl_args=("$repo_id")
     if [ -n "$subfolder" ]; then
@@ -850,14 +903,14 @@ print(json.dumps({'need': need, 'free': free}))
     dl_args+=(--cache-dir "$hub_dir")
 
     if command -v hf &>/dev/null; then
-        hf download "${dl_args[@]}"
+        HF_TOKEN="$hf_token" hf download "${dl_args[@]}"
     elif command -v huggingface-cli &>/dev/null; then
-        huggingface-cli download "${dl_args[@]}"
+        HF_TOKEN="$hf_token" huggingface-cli download "${dl_args[@]}"
     elif command -v uvx &>/dev/null; then
         # No global hf CLI: run it out of a throwaway uv environment.
-        uvx --from "huggingface_hub[hf_transfer]" hf download "${dl_args[@]}"
+        HF_TOKEN="$hf_token" uvx --from huggingface_hub --with hf_xet hf download "${dl_args[@]}"
     else
-        python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='$repo_id', allow_patterns=['$subfolder/*'] if '$subfolder' else None, cache_dir='$hub_dir')"
+        HF_TOKEN="$hf_token" python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='$repo_id', allow_patterns=['$subfolder/*'] if '$subfolder' else None, cache_dir='$hub_dir')"
     fi
 
     echo ""
@@ -1393,7 +1446,7 @@ main_menu() {
     while true; do
         clear 2>/dev/null || true
         echo "╔════════════════════════════════════════════════════════════╗"
-        echo "║       MLX Model Control Center v0.7.2 (Multi-Drive)        ║"
+        echo "║      MLX Model Control Center v0.8.0 (Fast Downloads)      ║"
         echo "╚════════════════════════════════════════════════════════════╝"
         show_running_header
         echo "  1. List Downloaded Models (Select # to Launch)"
@@ -1449,6 +1502,9 @@ case "${1:-}" in
     download) shift; download_model "$@" ;;
     drives|storage) cmd_drives ;;
     protect-models|tm-off) cmd_protect_models ;;
+    login|hf-login) cmd_login ;;
+    logout|hf-logout) cmd_logout ;;
+    whoami|hf-whoami) cmd_whoami ;;
     use-drive|drive) cmd_use_drive "${2:-}" ;;
     delete) delete_model ;;
     status|running) view_health ;;

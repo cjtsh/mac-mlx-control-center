@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-import os, sys, json, subprocess, re, urllib.request, urllib.parse, socket, time, threading
+import os, sys, json, hashlib, signal, shlex, subprocess, re, shutil, urllib.request, urllib.parse, urllib.error, socket, time, threading
 
 _REPO_SIZE_CACHE = {}
 _SPEED_CACHE = {}
+_SPEED_HIST = {}
+_DL_WATCH = {}
+_STALL_SECONDS = 90
+_STALL_MIN_BYTES = 1 << 20
+_STALL_MAX_RETRIES = 3
+_WATCH_THREAD = None
+_DOWNLOAD_LOG = os.path.expanduser("~/.mlx_logs/downloads.log")
 PAUSED_FILE = os.path.expanduser("~/.mlx_pids/paused_downloads.json")
 SETTINGS_FILE = os.path.expanduser("~/.mlx_pids/settings.json")
 SIZE_INFO_CACHE_FILE = os.path.expanduser("~/.mlx_pids/repo_sizes.json")
@@ -17,7 +24,8 @@ def load_global_settings():
         "default_host": "127.0.0.1",
         "default_temp": 0.0,
         "default_max_tokens": 4096,
-        "auto_sync_agents": True
+        "auto_sync_agents": True,
+        "turbo_downloads": True
     }
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -36,6 +44,248 @@ def save_global_settings(settings):
     except Exception:
         pass
 
+# ---------------------------------------------------------------------------
+# Hugging Face credentials (never shipped in the repo: per-user, stored locally)
+# ---------------------------------------------------------------------------
+KEYCHAIN_SERVICE = "mlx-control-center"
+SECRETS_FILE = os.path.expanduser("~/.mlx_pids/secrets.json")
+HF_HOST = "https://huggingface.co"
+HF_OAUTH_DEVICE = HF_HOST + "/oauth/device"
+HF_OAUTH_TOKEN = HF_HOST + "/oauth/token"
+HF_OAUTH_REGISTER = HF_HOST + "/oauth/register"
+HF_OAUTH_SCOPES = "openid profile read-repos"
+_SECRET_LOCK = threading.Lock()
+
+def _keychain_available():
+    return sys.platform == "darwin" and bool(shutil.which("security"))
+
+def _secret_read_keychain():
+    try:
+        out = subprocess.run(
+            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", "hf", "-w"],
+            capture_output=True, text=True, timeout=10)
+        if out.returncode == 0 and out.stdout.strip():
+            return json.loads(out.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+def _secret_write_keychain(data):
+    try:
+        out = subprocess.run(
+            ["security", "add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", "hf",
+             "-l", "macOS MLX Control Center - Hugging Face", "-w", json.dumps(data)],
+            capture_output=True, text=True, timeout=10)
+        return out.returncode == 0
+    except Exception:
+        return False
+
+def _secret_delete_keychain():
+    try:
+        subprocess.run(["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", "hf"],
+                       capture_output=True, text=True, timeout=10)
+    except Exception:
+        pass
+
+def _secret_read_file():
+    try:
+        if os.path.exists(SECRETS_FILE):
+            with open(SECRETS_FILE) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
+
+def _secret_write_file(data):
+    try:
+        os.makedirs(os.path.dirname(SECRETS_FILE), exist_ok=True)
+        fd = os.open(SECRETS_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        return True
+    except Exception:
+        return False
+
+def load_secrets():
+    """Token + OAuth client id, from Keychain when possible, else a 0600 JSON file."""
+    with _SECRET_LOCK:
+        data = _secret_read_keychain() or _secret_read_file() or {}
+    if not isinstance(data, dict):
+        data = {}
+    return data
+
+def save_secrets(data):
+    with _SECRET_LOCK:
+        stored = _secret_write_keychain(data) if _keychain_available() else False
+        if not stored:
+            _secret_write_file(data)
+        elif os.path.exists(SECRETS_FILE):
+            try:
+                os.remove(SECRETS_FILE)  # do not leave a plaintext copy behind
+            except Exception:
+                pass
+    return True
+
+def hf_storage_backend():
+    return "keychain" if _keychain_available() else "file"
+
+def get_hf_token():
+    token = (load_secrets().get("token") or os.environ.get("HF_TOKEN")
+             or os.environ.get("HUGGING_FACE_HUB_TOKEN") or "")
+    return token.strip()
+
+def hf_token_env():
+    token = get_hf_token()
+    if not token:
+        return {}
+    return {"HF_TOKEN": token, "HUGGING_FACE_HUB_TOKEN": token}
+
+def set_hf_token(token, kind="token", user=""):
+    data = load_secrets()
+    data.update({"token": token.strip(), "kind": kind, "user": user, "saved_at": int(time.time())})
+    save_secrets(data)
+    return data
+
+def clear_hf_token():
+    data = load_secrets()
+    keep = {k: v for k, v in data.items() if k == "client_id"}
+    if keep:
+        save_secrets(keep)
+    else:
+        with _SECRET_LOCK:
+            _secret_delete_keychain()
+            try:
+                if os.path.exists(SECRETS_FILE):
+                    os.remove(SECRETS_FILE)
+            except Exception:
+                pass
+    return True
+
+def _http_json(url, payload=None, method=None, timeout=30, token=None):
+    """Minimal JSON-over-HTTP helper (form or JSON payloads) with no extra deps."""
+    headers = {"Accept": "application/json"}
+    data = None
+    if payload is not None:
+        if isinstance(payload, dict) and payload.get("__json__"):
+            body = {k: v for k, v in payload.items() if k != "__json__"}
+            data = json.dumps(body).encode()
+            headers["Content-Type"] = "application/json"
+        else:
+            data = urllib.parse.urlencode(payload).encode()
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    req = urllib.request.Request(url, data=data, headers=headers, method=method or ("POST" if data else "GET"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read().decode("utf-8", "replace")
+            return r.status, (json.loads(body) if body.strip().startswith(("{", "[")) else {"raw": body})
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")
+        try:
+            parsed = json.loads(body)
+        except Exception:
+            parsed = {"error": body[:400]}
+        return e.code, parsed
+    except Exception as e:
+        return 0, {"error": str(e)}
+
+def hf_whoami(token=None):
+    """Validate a token against the Hub and return its identity."""
+    token = token or get_hf_token()
+    if not token:
+        return {"ok": False, "error": "no token", "anonymous": True}
+    status, data = _http_json(HF_HOST + "/api/whoami-v2", token=token, timeout=20)
+    if status == 200 and data.get("name"):
+        return {"ok": True, "user": data.get("name"), "type": data.get("type", "user"),
+                "email": data.get("email", ""), "orgs": [o.get("name") for o in (data.get("orgs") or [])]}
+    if status in (401, 403):
+        return {"ok": False, "error": "invalid or expired token", "status": status}
+    return {"ok": False, "error": data.get("error", f"HTTP {status}"), "status": status}
+
+def hf_auth_state():
+    """What the UI needs: signed in or not, as which user, where the secret lives."""
+    token = get_hf_token()
+    secrets = load_secrets()
+    state = {
+        "signed_in": bool(token),
+        "user": secrets.get("user", ""),
+        "kind": secrets.get("kind", ""),
+        "storage": hf_storage_backend(),
+        "device_flow": True,
+    }
+    if token and not state["user"]:
+        who = hf_whoami(token)
+        if who.get("ok"):
+            state["user"] = who["user"]
+            set_hf_token(token, secrets.get("kind", "token"), who["user"])
+        else:
+            state["invalid"] = who.get("error", "invalid token")
+    return state
+
+def hf_ensure_client_id():
+    """Register this install as its own OAuth client (public, no secret, not in the repo)."""
+    data = load_secrets()
+    if data.get("client_id"):
+        return data["client_id"]
+    status, resp = _http_json(HF_OAUTH_REGISTER, {
+        "__json__": True,
+        "client_name": "macOS MLX Control Center",
+        "redirect_uris": [],
+        "grant_types": ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+        "scope": HF_OAUTH_SCOPES,
+    }, timeout=25)
+    if status in (200, 201) and resp.get("client_id"):
+        data["client_id"] = resp["client_id"]
+        save_secrets(data)
+        return resp["client_id"]
+    raise RuntimeError(resp.get("error") or f"client registration failed (HTTP {status})")
+
+def hf_device_start():
+    """Begin a device-code login: returns the code the user types in the browser."""
+    client_id = hf_ensure_client_id()
+    status, resp = _http_json(HF_OAUTH_DEVICE, {
+        "client_id": client_id,
+        "scope": HF_OAUTH_SCOPES,
+    }, timeout=25)
+    if status != 200 or not resp.get("device_code"):
+        return {"ok": False, "error": resp.get("error") or f"HTTP {status}"}
+    return {
+        "ok": True,
+        "device_code": resp.get("device_code"),
+        "user_code": resp.get("user_code"),
+        "verification_uri": resp.get("verification_uri") or (HF_HOST + "/oauth/device"),
+        "expires_in": resp.get("expires_in", 300),
+        "interval": resp.get("interval", 5),
+    }
+
+def hf_device_poll(device_code):
+    """One poll of the device flow. pending/slow_down/expired/accepted."""
+    client_id = load_secrets().get("client_id") or hf_ensure_client_id()
+    status, resp = _http_json(HF_OAUTH_TOKEN, {
+        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+        "device_code": device_code,
+        "client_id": client_id,
+    }, timeout=25)
+    if status == 200 and resp.get("access_token"):
+        token = resp["access_token"]
+        who = hf_whoami(token)
+        user = who.get("user", "") if who.get("ok") else ""
+        set_hf_token(token, "oauth", user)
+        return {"status": "accepted", "user": user, "ok": bool(user), "who": who}
+    err = (resp.get("error") or "").lower()
+    if err in ("authorization_pending", "pending"):
+        return {"status": "pending"}
+    if err == "slow_down":
+        return {"status": "slow_down"}
+    if err in ("expired_token", "expired"):
+        return {"status": "expired"}
+    if err in ("access_denied", "denied"):
+        return {"status": "denied"}
+    return {"status": "error", "error": resp.get("error_description") or resp.get("error") or f"HTTP {status}"}
+
 def get_mlx_env():
     """Builds environment with full PATH resolution for Apple Silicon and standard macOS binaries."""
     env = os.environ.copy()
@@ -50,8 +300,14 @@ def get_mlx_env():
     ]
     env["PATH"] = ":".join([p for p in paths if p])
     env["PYTHONUNBUFFERED"] = "1"
-    env["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+    # huggingface_hub >= 1.0 downloads through Xet; hf_transfer is gone.
+    env.pop("HF_HUB_ENABLE_HF_TRANSFER", None)
     env["HF_XET_HIGH_PERFORMANCE"] = "1"
+    env["HF_HUB_DOWNLOAD_TIMEOUT"] = "30"
+    env["HF_HUB_ETAG_TIMEOUT"] = "20"
+    # User's own credentials, never baked into the repo.
+    for k, v in hf_token_env().items():
+        env[k] = v
     return env
 
 STORAGE_FILE = os.path.expanduser("~/.mlx_pids/storage.json")
@@ -456,7 +712,8 @@ def get_download_cmd(repo_id, subfolder="", revision="", cache_dir=""):
         cmd = ["huggingface-cli", "download", repo_id]
     elif shutil.which("uvx") or os.path.isfile(os.path.expanduser("~/.local/bin/uvx")):
         uvx_bin = shutil.which("uvx") or os.path.expanduser("~/.local/bin/uvx")
-        cmd = [uvx_bin, "--from", "huggingface_hub[hf_transfer]", "hf", "download", repo_id]
+        # NB: uvx ignores bracketed extras on --from; ask for the Xet engine directly.
+        cmd = [uvx_bin, "--from", "huggingface_hub", "--with", "hf_xet", "hf", "download", repo_id]
     else:
         cmd = ["hf", "download", repo_id]
 
@@ -950,6 +1207,382 @@ def get_running_servers():
 
     return list(unique.values())
 
+def _pid_descendants(pid):
+    """Every PID below `pid` (uvx wraps the real downloader in a child process)."""
+    try:
+        out = subprocess.check_output(["ps", "-axo", "pid=,ppid="], text=True)
+    except Exception:
+        return []
+    children = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            c, p_ = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children.setdefault(p_, []).append(c)
+    found, stack = [], [pid]
+    while stack:
+        cur = stack.pop()
+        for child in children.get(cur, []):
+            found.append(child)
+            stack.append(child)
+    return found
+
+def _kill_download_tree(pid):
+    pids = [int(pid)] + _pid_descendants(int(pid))
+    for p_ in reversed(pids):
+        try:
+            os.kill(p_, signal.SIGTERM)
+        except Exception:
+            pass
+    time.sleep(2)
+    for p_ in reversed(pids):
+        try:
+            os.kill(p_, signal.SIGKILL)
+        except Exception:
+            pass
+    return pids
+
+def _cmdline_for_pid(pid):
+    try:
+        out = subprocess.check_output(["ps", "-p", str(pid), "-o", "command="], text=True).strip()
+        return shlex.split(out) if out else []
+    except Exception:
+        return []
+
+def _relaunch_download(cmd, cache_dir=""):
+    """Restart a stalled transfer; huggingface_hub resumes from .incomplete files."""
+    if not cmd:
+        return None
+    env = get_mlx_env()
+    try:
+        os.makedirs(os.path.dirname(_DOWNLOAD_LOG), exist_ok=True)
+        log = open(_DOWNLOAD_LOG, "a")
+        log.write(f"\n--- auto-resume {time.strftime('%H:%M:%S')}: {' '.join(cmd)} ---\n")
+        log.flush()
+        proc = subprocess.Popen(cmd, env=env, stdout=log, stderr=log)
+        return proc.pid
+    except Exception:
+        return None
+
+def _watchdog_tick():
+    try:
+        active = get_active_downloads()
+    except Exception:
+        return
+    now = time.time()
+    live_ids = set()
+    for dl in active:
+        did = dl.get("download_id") or dl.get("repo_id")
+        live_ids.add(did)
+        rec = _DL_WATCH.setdefault(did, {"bytes": 0, "ts": now, "attempts": 0,
+                                         "stalled": False, "resuming": False})
+        cur = int(dl.get("downloaded_bytes") or 0)
+        finalising = (str(dl.get("phase") or "").lower() in ("hub", "finalising")
+                      or dl.get("status") == "FINALISING")
+        if finalising:
+            # Linking/verifying moves no bytes; killing it would corrupt the cache.
+            rec.update(bytes=cur, ts=now, stalled=False, resuming=False)
+            continue
+        if cur > rec["bytes"] + _STALL_MIN_BYTES:
+            rec.update(bytes=cur, ts=now, stalled=False, resuming=False)
+            continue
+        rec["bytes"] = max(rec["bytes"], cur)
+        quiet = now - rec["ts"]
+        if quiet < _STALL_SECONDS or rec["stalled"]:
+            continue
+        pid = dl.get("pid")
+        if not pid:
+            continue
+        if rec["attempts"] >= _STALL_MAX_RETRIES:
+            rec.update(stalled=True, resuming=False)
+            continue
+        # Rebuild the command ourselves: the live process may be a uvx shim whose
+        # argv[0] cannot be executed again outside its throwaway environment.
+        repo = dl.get("repo_id") or ""
+        if dl.get("turbo"):
+            hub = dl.get("cache_dir") or ""
+            cmd = ([sys.executable, os.path.abspath(__file__), "turbo_download", repo, hub,
+                    dl.get("download_id") or repo] if repo and hub else [])
+        else:
+            hub = dl.get("cache_dir") or ""
+            # `hf` prints repo-scoped paths; relaunch must target the library root.
+            if os.path.basename(hub.rstrip("/")).startswith("models--"):
+                hub = os.path.dirname(hub.rstrip("/"))
+            cmd = (get_download_cmd(repo, subfolder=dl.get("subfolder") or "",
+                                    revision=dl.get("revision") or "main",
+                                    cache_dir=hub) if repo else [])
+        rec["attempts"] += 1
+        rec["resuming"] = True
+        _kill_download_tree(pid)
+        new_pid = _relaunch_download(cmd)
+        rec.update(ts=time.time(), stalled=False, resuming=bool(new_pid), pid=new_pid or 0)
+    for did in list(_DL_WATCH.keys()):
+        if did not in live_ids:
+            _DL_WATCH.pop(did, None)
+
+def start_download_watchdog():
+    """Background thread: kill 0 B/s transfers and resume them automatically."""
+    global _WATCH_THREAD
+    if _WATCH_THREAD and _WATCH_THREAD.is_alive():
+        return _WATCH_THREAD
+    def _loop():
+        while True:
+            try:
+                _watchdog_tick()
+            except Exception:
+                pass
+            time.sleep(10)
+    _WATCH_THREAD = threading.Thread(target=_loop, name="mlx-download-watchdog", daemon=True)
+    _WATCH_THREAD.start()
+    return _WATCH_THREAD
+
+def download_watch_state():
+    return {k: dict(v) for k, v in _DL_WATCH.items()}
+
+# ---------------------------------------------------------------------------
+# Turbo: parallel range downloads for large LFS files (single streams are slow)
+# ---------------------------------------------------------------------------
+TURBO_MIN_BYTES = 256 * 1024 * 1024
+TURBO_CONNS = 8
+TURBO_DIR = os.path.expanduser("~/.mlx_pids/turbo")
+_TURBO_LOCK = threading.Lock()
+
+def _turbo_status_path(download_id):
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", download_id or "download")
+    return os.path.join(TURBO_DIR, safe + ".json")
+
+def write_turbo_status(download_id, data):
+    try:
+        os.makedirs(TURBO_DIR, exist_ok=True)
+        payload = dict(data)
+        payload["updated"] = time.time()
+        path = _turbo_status_path(download_id)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+def clear_turbo_status(download_id):
+    try:
+        os.remove(_turbo_status_path(download_id))
+    except Exception:
+        pass
+
+def read_turbo_statuses():
+    out = []
+    if not os.path.isdir(TURBO_DIR):
+        return out
+    now = time.time()
+    for name in os.listdir(TURBO_DIR):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(TURBO_DIR, name)
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        if now - float(data.get("updated") or 0) > 45:
+            clear_turbo_status(data.get("download_id") or name[:-5])
+            continue
+        out.append(data)
+    return out
+
+def turbo_plan(repo_id):
+    """Which files are worth parallelising, and how many bytes that is."""
+    token = get_hf_token()
+    meta = fetch_repo_meta(repo_id, token=token)
+    if not meta:
+        return {"files": [], "bytes": 0, "reason": "repo metadata unavailable"}
+    files = []
+    for sib in meta.get("siblings") or []:
+        lfs = sib.get("lfs") or {}
+        size = sib.get("size") or lfs.get("size") or 0
+        sha = lfs.get("sha256") or ""
+        if sha and size >= TURBO_MIN_BYTES:
+            files.append({"path": sib.get("rfilename"), "size": int(size), "sha256": sha})
+    files.sort(key=lambda f: -f["size"])
+    return {"files": files, "bytes": sum(f["size"] for f in files)}
+
+def fetch_repo_meta(repo_id, token=""):
+    url = f"{HF_HOST}/api/models/{repo_id}?blobs=true"
+    status, data = _http_json(url, token=token, timeout=30)
+    if status == 200 and isinstance(data, dict):
+        return data
+    return {}
+
+def _download_range(url, start, end, path, token="", retries=6):
+    """Fetch [start, end] into `path`, resuming whatever is already on disk."""
+    want = end - start + 1
+    for attempt in range(retries):
+        try:
+            have = os.path.getsize(path) if os.path.exists(path) else 0
+            if have >= want:
+                return True
+            headers = {"Range": f"bytes={start + have}-{end}", "User-Agent": "mlx-control-center"}
+            if token:
+                headers["Authorization"] = "Bearer " + token
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=90) as r:
+                if getattr(r, "status", 200) == 200:
+                    return False  # server ignored the Range header
+                with open(path, "ab") as f:
+                    while True:
+                        chunk = r.read(1024 * 256)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        f.flush()
+            if os.path.getsize(path) >= want:
+                return True
+        except Exception:
+            pass
+        if attempt < retries - 1:
+            time.sleep(min(1.5 ** attempt, 10) + (0.4 * (attempt % 3)))
+    return os.path.getsize(path) >= want if os.path.exists(path) else False
+
+def repo_blob_dir(hub_dir, repo_id):
+    """Where huggingface_hub 2.x actually keeps blobs: models--org--repo/blobs."""
+    return os.path.join(hub_dir, "models--" + repo_id.replace("/", "--"), "blobs")
+
+def turbo_fetch_file(repo_id, rel_path, size, sha256, hub_dir, token="", conns=None,
+                     on_progress=None, revision="main"):
+    """Parallel download of one LFS file straight into the HF cache blob layout."""
+    conns = max(2, min(int(conns or TURBO_CONNS), 16))
+    blob = os.path.join(repo_blob_dir(hub_dir, repo_id), sha256)
+    if os.path.exists(blob) and os.path.getsize(blob) == size:
+        return {"ok": True, "skipped": True, "bytes": size}
+    os.makedirs(os.path.dirname(blob), exist_ok=True)
+    parts_dir = blob + ".parts"
+    os.makedirs(parts_dir, exist_ok=True)
+    url = f"{HF_HOST}/{repo_id}/resolve/{revision}/{urllib.parse.quote(rel_path)}"
+    chunk = (size + conns - 1) // conns
+    ranges = []
+    for i in range(conns):
+        start = i * chunk
+        end = min(size - 1, start + chunk - 1)
+        if start >= size:
+            break
+        ranges.append((i, start, end))
+
+    def _part_path(i):
+        return os.path.join(parts_dir, f"part{i:02d}")
+
+    def _part_done(i, start, end):
+        p = _part_path(i)
+        return os.path.exists(p) and os.path.getsize(p) >= (end - start + 1)
+
+    # Three passes: throttled CDNs drop connections; parts on disk make this cheap.
+    last_error = "range download failed"
+    for attempt in range(3):
+        pending = [r for r in ranges if not _part_done(*r)]
+        if not pending:
+            break
+        stop = {"flag": False}
+
+        def _run(i, start, end, _stop=stop):
+            if _stop["flag"]:
+                return False
+            ok = _download_range(url, start, end, _part_path(i), token=token, retries=8)
+            if not ok and not _part_done(i, start, end):
+                _stop["flag"] = True
+                return False
+            return True
+
+        threads = [threading.Thread(target=_run, args=r, daemon=True) for r in pending]
+        for t in threads:
+            t.start()
+        last_report = 0.0
+        while any(t.is_alive() for t in threads):
+            if on_progress:
+                done = 0
+                for i, _s, _e in ranges:
+                    if os.path.exists(_part_path(i)):
+                        done += os.path.getsize(_part_path(i))
+                now = time.time()
+                if now - last_report >= 1.0:
+                    on_progress(done)
+                    last_report = now
+            time.sleep(0.4)
+        if all(_part_done(*r) for r in ranges):
+            break
+        time.sleep(8 + 6 * attempt)
+
+    if not all(_part_done(*r) for r in ranges):
+        return {"ok": False, "error": last_error, "bytes": 0, "retryable": True}
+
+    # assemble + verify before publishing the blob
+    tmp_blob = blob + ".turbo"
+    h = hashlib.sha256()
+    with open(tmp_blob, "wb") as out:
+        for i, _s, _e in ranges:
+            p = os.path.join(parts_dir, f"part{i:02d}")
+            with open(p, "rb") as f:
+                while True:
+                    buf = f.read(4 * 1024 * 1024)
+                    if not buf:
+                        break
+                    h.update(buf)
+                    out.write(buf)
+    digest = h.hexdigest()
+    if digest != sha256:
+        try:
+            os.remove(tmp_blob)
+        except Exception:
+            pass
+        return {"ok": False, "error": f"sha256 mismatch for {rel_path}", "bytes": 0}
+    os.replace(tmp_blob, blob)
+    shutil.rmtree(parts_dir, ignore_errors=True)
+    return {"ok": True, "skipped": False, "bytes": size}
+
+def turbo_download(repo_id, hub_dir, subfolder="", conns=None, download_id="", revision="main"):
+    """Download every >256 MB LFS blob with N parallel connections, then let the
+    regular hub client finish (snapshot links, small files, refs)."""
+    token = get_hf_token()
+    plan = turbo_plan(repo_id)
+    files = plan.get("files") or []
+    total = plan.get("bytes") or 0
+    did = download_id or repo_id
+
+    def _status(**kw):
+        payload = {"download_id": did, "repo_id": repo_id, "hub": hub_dir,
+                   "total_bytes": total, "conns": conns or TURBO_CONNS, "pid": os.getpid()}
+        payload.update(kw)
+        write_turbo_status(did, payload)
+
+    if not files:
+        _status(phase="hub", downloaded_bytes=0, note="no large LFS blobs")
+        return {"ok": True, "files": 0, "bytes": 0}
+
+    done_bytes = 0
+    for f in files:
+        # Ranges are sequential per file, so keep a per-file offset for progress.
+        base = done_bytes
+        _status(phase="turbo", current=f["path"], file_size=f["size"],
+                downloaded_bytes=base, files_done=files.index(f), files_total=len(files))
+        res = turbo_fetch_file(
+            repo_id, f["path"], f["size"], f["sha256"], hub_dir,
+            token=token, conns=conns, revision=revision,
+            on_progress=lambda d, base=base: _status(
+                phase="turbo", current=f["path"], file_size=f["size"],
+                downloaded_bytes=base + d, files_done=files.index(f), files_total=len(files)),
+        )
+        if not res.get("ok"):
+            _status(phase="error", error=res.get("error", "download failed"),
+                    downloaded_bytes=done_bytes)
+            return {"ok": False, "error": res.get("error"), "bytes": done_bytes}
+        done_bytes += f["size"]
+        _status(phase="turbo", current=f["path"], file_size=f["size"],
+                downloaded_bytes=done_bytes, files_done=files.index(f) + 1, files_total=len(files))
+    _status(phase="hub", downloaded_bytes=done_bytes, note="finalising snapshot links")
+    return {"ok": True, "files": len(files), "bytes": done_bytes}
+
 def get_active_downloads():
     downloads = []
     now = time.time()
@@ -996,27 +1629,32 @@ def get_active_downloads():
                 percent = round((downloaded_bytes / total_bytes) * 100, 1) if total_bytes > 0 else 0
                 percent = min(100.0, percent)
 
+                # Rolling 15 s window so a single quiet sample never reads as 0 MB/s.
+                hist = _SPEED_HIST.setdefault(download_id, [])
+                hist.append((now, downloaded_bytes))
+                while len(hist) > 2 and now - hist[0][0] > 15:
+                    hist.pop(0)
                 speed_str = "Calculating..."
                 eta_str = "--"
-                if download_id in _SPEED_CACHE:
-                    prev_bytes, prev_time = _SPEED_CACHE[download_id]
-                    dt = now - prev_time
-                    if dt > 0.5:
-                        dbytes = downloaded_bytes - prev_bytes
-                        speed_bps = dbytes / dt
-                        speed_mb = speed_bps / (1024**2)
-                        if speed_mb > 0.05:
-                            speed_str = f"{speed_mb:.1f} MB/s"
-                            rem_bytes = max(0, total_bytes - downloaded_bytes)
-                            if rem_bytes > 0 and speed_bps > 0:
-                                rem_sec = int(rem_bytes / speed_bps)
-                                if rem_sec < 60:
-                                    eta_str = f"{rem_sec}s"
-                                else:
-                                    eta_str = f"{rem_sec//60}m {rem_sec%60}s"
-                        else:
-                            speed_str = "0 MB/s"
-                _SPEED_CACHE[download_id] = (downloaded_bytes, now)
+                if len(hist) >= 2 and now - hist[0][0] >= 1.5:
+                    dbytes = downloaded_bytes - hist[0][1]
+                    dt = now - hist[0][0]
+                    speed_bps = max(0.0, dbytes / dt) if dt > 0 else 0.0
+                    speed_mb = speed_bps / (1024**2)
+                    if speed_mb > 0.05:
+                        speed_str = f"{speed_mb:.1f} MB/s"
+                        rem_bytes = max(0, total_bytes - downloaded_bytes)
+                        if rem_bytes > 0 and speed_bps > 0:
+                            rem_sec = int(rem_bytes / speed_bps)
+                            eta_str = f"{rem_sec}s" if rem_sec < 60 else f"{rem_sec//60}m {rem_sec%60}s"
+                    else:
+                        speed_str = "0 MB/s"
+                watch = _DL_WATCH.get(download_id) or {}
+                stalled = bool(watch.get("stalled"))
+                if stalled:
+                    speed_str = "stalled"
+                    eta_str = "resuming…" if watch.get("resuming") else "paused — retry"
+
 
                 dl_gb = downloaded_bytes / (1024**3)
                 dl_str = f"{dl_gb:.2f} GB" if dl_gb >= 1 else f"{downloaded_bytes/(1024**2):.1f} MB"
@@ -1037,7 +1675,8 @@ def get_active_downloads():
                     "percent": percent,
                     "speed": speed_str,
                     "eta": eta_str,
-                    "status": "DOWNLOADING",
+                    "status": "STALLED" if stalled else "DOWNLOADING",
+                    "attempts": int(watch.get("attempts") or 0),
                     "cache_dir": cache_dir
                 })
     except Exception:
@@ -1100,6 +1739,60 @@ def get_active_downloads():
         if prev is None or (d.get("pid") and not prev.get("pid")):
             deduped[key] = d
     downloads = list(deduped.values())
+
+    # Turbo workers are not `hf download` processes; merge their own progress feed.
+    known = {(d.get("download_id") or d.get("repo_id")) for d in downloads}
+    for st in read_turbo_statuses():
+        did = st.get("download_id") or st.get("repo_id")
+        if did in known:
+            continue
+        got = int(st.get("downloaded_bytes") or 0)
+        total = int(st.get("total_bytes") or 0)
+        key = "turbo:" + str(did)
+        hist = _SPEED_HIST.setdefault(key, [])
+        hist.append((now, got))
+        while len(hist) > 2 and now - hist[0][0] > 15:
+            hist.pop(0)
+        speed_str, eta_str = "Calculating...", "--"
+        if len(hist) >= 2 and now - hist[0][0] >= 1.5:
+            bps = max(0.0, (got - hist[0][1]) / (now - hist[0][0]))
+            if bps / (1024 ** 2) > 0.05:
+                speed_str = f"{bps / (1024**2):.1f} MB/s"
+                if total > got > 0:
+                    rem = int((total - got) / bps)
+                    eta_str = f"{rem}s" if rem < 60 else f"{rem//60}m {rem%60}s"
+            else:
+                speed_str = "0 MB/s"
+        phase = st.get("phase") or "turbo"
+        status = "DOWNLOADING"
+        if phase == "error":
+            status = "STALLED"
+            speed_str = st.get("error", "failed")
+        elif phase == "hub":
+            status = "FINALISING"
+            speed_str = "linking files"
+        dl_bytes = got / (1024 ** 3)
+        tot_bytes = total / (1024 ** 3)
+        downloads.append({
+            "pid": st.get("pid"),
+            "repo_id": st.get("repo_id"),
+            "subfolder": "",
+            "download_id": did,
+            "display_name": st.get("repo_id"),
+            "downloaded_bytes": got,
+            "downloaded_size": f"{dl_bytes:.2f} GB" if got >= 1024**3 else f"{got/(1024**2):.1f} MB",
+            "total_bytes": total,
+            "total_size": f"{tot_bytes:.2f} GB" if total >= 1024**3 else (f"{total/(1024**2):.1f} MB" if total else "Unknown"),
+            "percent": round(min(100.0, got / total * 100), 1) if total else 0,
+            "speed": speed_str,
+            "eta": eta_str,
+            "status": status,
+            "attempts": 0,
+            "turbo": True,
+            "phase": phase,
+            "conns": st.get("conns"),
+            "cache_dir": st.get("hub", ""),
+        })
 
     return downloads
 
@@ -1835,6 +2528,63 @@ if __name__ == "__main__":
                                        quant=qt, max_ram=mr)))
     elif cmd == "repo_size":
         print(json.dumps(fetch_repo_size_info(sys.argv[2] if len(sys.argv) > 2 else "")))
+    elif cmd == "turbo_download":
+        # argv: turbo_download <repo> <hub> <download_id> [subfolder] [revision]
+        repo = sys.argv[2] if len(sys.argv) > 2 else ""
+        hub = sys.argv[3] if len(sys.argv) > 3 else ""
+        did = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else repo
+        sub = sys.argv[5] if len(sys.argv) > 5 else ""
+        rev = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] else "main"
+        try:
+            res = turbo_download(repo, hub, subfolder=sub, download_id=did, revision=rev)
+        except Exception as e:
+            res = {"ok": False, "error": str(e)}
+        if not res.get("ok"):
+            write_turbo_status(did, {"download_id": did, "repo_id": repo, "phase": "error",
+                                     "error": res.get("error", "download failed"),
+                                     "downloaded_bytes": res.get("bytes", 0), "pid": os.getpid()})
+            print(f"TURBO FAILED: {res.get('error')} — falling back to the standard downloader")
+        # Phase 2: normal hub client finishes links/refs and any remaining small files.
+        write_turbo_status(did, {"download_id": did, "repo_id": repo, "phase": "hub",
+                                 "hub": hub, "downloaded_bytes": res.get("bytes", 0),
+                                 "total_bytes": res.get("bytes", 0), "pid": os.getpid()})
+        final = get_download_cmd(repo, subfolder=sub, revision=rev, cache_dir=hub)
+        env = get_mlx_env()
+        if res.get("ok"):
+            # Xet keeps its own chunk store and would re-download what we just placed;
+            # the classic client links our verified blobs instead.
+            env["HF_HUB_DISABLE_XET"] = "1"
+        try:
+            proc = subprocess.Popen(final, env=env)
+            proc.wait()
+        finally:
+            clear_turbo_status(did)
+    elif cmd == "turbo_plan":
+        print(json.dumps(turbo_plan(sys.argv[2] if len(sys.argv) > 2 else "")))
+    elif cmd == "hf_token":
+        print(get_hf_token())
+    elif cmd == "hf_auth":
+        print(json.dumps(hf_auth_state()))
+    elif cmd == "hf_login":
+        st = hf_device_start()
+        if not st.get("ok"):
+            print(json.dumps({"ok": False, "error": st.get("error")}))
+            sys.exit(1)
+        print(f"Open {st['verification_uri']} and approve the code: {st['user_code']}")
+        deadline = time.time() + int(st.get("expires_in", 300))
+        interval = max(3, int(st.get("interval", 5)))
+        while time.time() < deadline:
+            time.sleep(interval)
+            poll = hf_device_poll(st["device_code"])
+            if poll.get("status") == "accepted":
+                print(f"✓ Signed in as {poll.get('user') or 'unknown'}")
+                break
+            if poll.get("status") in ("expired", "denied", "error"):
+                print(json.dumps({"ok": False, "status": poll.get("status")}))
+                sys.exit(1)
+    elif cmd == "hf_logout":
+        clear_hf_token()
+        print("Signed out of Hugging Face (token removed from this Mac).")
     elif cmd == "drives":
         print(json.dumps({
             "drives": list_storage_drives(force=True),

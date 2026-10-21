@@ -81,7 +81,10 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.end_headers()
-        self.wfile.write(json.dumps(data).encode("utf-8"))
+        try:
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the tab navigated away; nothing to do
 
     def send_html(self, html_content, status_code=200):
         self.send_response(status_code)
@@ -116,6 +119,8 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             self.send_html(INDEX_HTML)
         elif path == "/favicon.ico" or path == "/favicon.svg":
             self.send_svg(FAVICON_SVG)
+        elif path == "/api/hf/auth":
+            self.send_json(mlx_helper.hf_auth_state())
         elif path == "/api/status":
             servers = mlx_helper.get_running_servers()
             stats = mlx_helper.get_system_stats()
@@ -232,6 +237,35 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             
             mlx_helper.save_global_settings(st)
             self.send_json({"status": "ok", "config": st})
+
+        elif path == "/api/hf/device/start":
+            try:
+                self.send_json(mlx_helper.hf_device_start())
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)}, 500)
+
+        elif path == "/api/hf/device/poll":
+            code = (payload.get("device_code") or "").strip()
+            if not code:
+                self.send_json({"status": "error", "error": "missing device_code"}, 400)
+                return
+            self.send_json(mlx_helper.hf_device_poll(code))
+
+        elif path == "/api/hf/token":
+            token = (payload.get("token") or "").strip()
+            if not token:
+                self.send_json({"ok": False, "error": "missing token"}, 400)
+                return
+            who = mlx_helper.hf_whoami(token)
+            if not who.get("ok"):
+                self.send_json({"ok": False, "error": who.get("error", "invalid token")}, 401)
+                return
+            mlx_helper.set_hf_token(token, "token", who.get("user", ""))
+            self.send_json({"ok": True, "user": who.get("user", ""), "auth": mlx_helper.hf_auth_state()})
+
+        elif path == "/api/hf/logout":
+            mlx_helper.clear_hf_token()
+            self.send_json({"ok": True, "auth": mlx_helper.hf_auth_state()})
 
         elif path == "/api/drives/default":
             target = (payload.get("drive") or "").strip()
@@ -592,8 +626,22 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                 mlx_helper.save_paused_downloads(paused)
 
             env = mlx_helper.get_mlx_env()
+            hub_dir = hub if drive and drive.get("connected") else ""
             cmd = mlx_helper.get_download_cmd(repo_id, subfolder=subfolder, revision=revision,
-                                             cache_dir=hub if drive and drive.get("connected") else "")
+                                             cache_dir=hub_dir)
+
+            # Single LFS streams run at ~75 KB/s here; parallelise big blobs first.
+            cfg = mlx_helper.load_global_settings()
+            turbo_used = False
+            if cfg.get("turbo_downloads", True) and hub_dir:
+                try:
+                    plan = mlx_helper.turbo_plan(repo_id)
+                except Exception:
+                    plan = {"files": []}
+                if plan.get("files"):
+                    cmd = [sys.executable, mlx_helper.__file__, "turbo_download", repo_id,
+                           hub_dir, download_id, subfolder, revision]
+                    turbo_used = True
 
             proc = subprocess.Popen(cmd, env=env)
             self.send_json({
@@ -606,7 +654,8 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                 "drive_id": (drive or {}).get("id", ""),
                 "hub": hub,
                 "needed_gb": needed_gb,
-                "pid": proc.pid
+                "pid": proc.pid,
+                "turbo": turbo_used
             })
 
         elif path == "/api/compare_models":
@@ -688,7 +737,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.7.2 (Multi-Drive)</title>
+  <title>macOS MLX Control Center v0.8.0 (Fast Downloads)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1129,12 +1178,13 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.7.2 (Multi-Drive)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.8.0 (Fast Downloads)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
     </div>
     <div style="display: flex; align-items: center; gap: 12px;">
+      <button class="btn btn-secondary" id="hfAuthBtn" style="padding: 8px 14px; font-size: 13px;" onclick="openHfModal()">🤗 Sign in</button>
       <button class="btn btn-secondary" style="padding: 8px 14px; font-size: 13px;" onclick="openConfigModal()">⚙️ API Settings</button>
       <div id="statusHeader">
         <div class="status-pill none"><span class="status-dot"></span> Checking Status...</div>
@@ -1479,6 +1529,60 @@ INDEX_HTML = """<!DOCTYPE html>
   </div>
 
   <!-- GLOBAL CONFIGURATION MODAL WITH RAM & TOKEN GUIDE -->
+  <div id="hfModal" class="modal-overlay">
+    <div class="modal" style="max-width: 560px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+        <div class="modal-header" style="margin-bottom: 0;">🤗 Hugging Face Account</div>
+        <button class="btn btn-secondary" style="padding: 4px 10px; font-size: 12px;" onclick="closeHfModal()">✕ Close</button>
+      </div>
+
+      <div id="hfSignedOut">
+        <div style="font-size: 13px; color: var(--text-muted); line-height: 1.6; margin-bottom: 14px;">
+          Signing in removes anonymous rate limits, unlocks gated and private repositories, and lets the Hub attribute your
+          downloads. The token is stored in your <strong>macOS Keychain</strong> — never in this repository, never in a config file
+          that gets committed.
+        </div>
+
+        <div id="hfDeviceBox" style="display: none; background: rgba(99,102,241,0.12); border: 1px solid rgba(99,102,241,0.4); border-radius: 10px; padding: 16px; margin-bottom: 14px;">
+          <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 6px;">1. Open this page and approve:</div>
+          <a id="hfDeviceLink" href="#" target="_blank" style="color: #60a5fa; font-size: 13px; word-break: break-all;"></a>
+          <div style="font-size: 12px; color: var(--text-muted); margin: 12px 0 6px;">2. Enter this code:</div>
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <code id="hfUserCode" style="font-size: 24px; letter-spacing: 3px; font-weight: 700; color: #a5b4fc;"></code>
+            <button class="btn btn-secondary" style="padding: 6px 10px; font-size: 12px;" onclick="copyHfCode()">Copy</button>
+          </div>
+          <div id="hfDeviceStatus" style="font-size: 12px; color: var(--text-muted); margin-top: 12px;">Waiting for approval…</div>
+        </div>
+
+        <div style="display: flex; gap: 8px; margin-bottom: 16px;">
+          <button class="btn btn-primary" id="hfLoginBtn" onclick="startHfLogin()">🤗 Sign in with Hugging Face</button>
+          <button class="btn btn-secondary" onclick="toggleHfTokenForm()">Paste a token instead</button>
+        </div>
+
+        <div id="hfTokenForm" style="display: none; border-top: 1px solid var(--card-border); padding-top: 14px;">
+          <label style="display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; color: var(--text-muted);">
+            User Access Token
+          </label>
+          <input type="password" id="hfTokenInput" placeholder="hf_…" style="width: 100%;" autocomplete="off" spellcheck="false">
+          <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
+            A <strong>Read</strong> token from
+            <a href="https://huggingface.co/settings/tokens/new?tokenType=read" target="_blank" style="color: #60a5fa;">huggingface.co/settings/tokens</a>
+            is enough. It never leaves this Mac.
+          </div>
+          <button class="btn btn-primary" style="margin-top: 10px;" onclick="submitHfToken()">Save &amp; verify</button>
+        </div>
+
+        <div id="hfError" style="display: none; color: #f87171; font-size: 12px; margin-top: 12px;"></div>
+      </div>
+
+      <div id="hfSignedIn" style="display: none;">
+        <div style="font-size: 14px; margin-bottom: 6px;">Signed in as <strong id="hfUserName" style="color: #34d399;"></strong></div>
+        <div id="hfUserMeta" style="font-size: 12px; color: var(--text-muted); margin-bottom: 16px;"></div>
+        <button class="btn btn-secondary" onclick="logoutHf()">Sign out</button>
+      </div>
+    </div>
+  </div>
+
   <div id="configModal" class="modal-overlay">
     <div class="modal" style="max-width: 560px;">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
@@ -2151,6 +2255,175 @@ INDEX_HTML = """<!DOCTYPE html>
       if (tabId === 'logs') loadLogs();
       if (tabId === 'test') loadTestServers();
       if (tabId === 'search') doSearch();
+    }
+
+    // ── Hugging Face account (device flow or pasted read token) ──────────────
+    let hfAuth = { signed_in: false };
+    let hfPollTimer = null;
+    let hfDeviceCode = null;
+
+    async function loadHfAuth() {
+      try {
+        const res = await fetch('/api/hf/auth');
+        hfAuth = await res.json();
+      } catch (e) { hfAuth = { signed_in: false }; }
+      renderHfAuth();
+      return hfAuth;
+    }
+
+    function renderHfAuth() {
+      const btn = document.getElementById('hfAuthBtn');
+      if (!btn) return;
+      if (hfAuth && hfAuth.signed_in) {
+        btn.innerHTML = `🤗 ${hfAuth.user || 'Signed in'}`;
+        btn.style.borderColor = 'rgba(52, 211, 153, 0.5)';
+        btn.title = `Signed in to Hugging Face as ${hfAuth.user} (secret in ${hfAuth.storage})`;
+      } else {
+        btn.innerHTML = '🤗 Sign in';
+        btn.style.borderColor = '';
+        btn.title = 'Sign in to Hugging Face for higher rate limits and gated repos';
+      }
+      const signedOut = document.getElementById('hfSignedOut');
+      const signedIn = document.getElementById('hfSignedIn');
+      if (signedOut && signedIn) {
+        const on = !!(hfAuth && hfAuth.signed_in);
+        signedOut.style.display = on ? 'none' : 'block';
+        signedIn.style.display = on ? 'block' : 'none';
+        if (on) {
+          document.getElementById('hfUserName').textContent = hfAuth.user || 'unknown';
+          document.getElementById('hfUserMeta').textContent =
+            `${hfAuth.kind === 'oauth' ? 'OAuth device login' : 'access token'} · secret stored in ${hfAuth.storage === 'keychain' ? 'macOS Keychain' : 'a 0600 file'}`;
+        }
+      }
+    }
+
+    function openHfModal() {
+      document.getElementById('hfModal').classList.add('active');
+      stopHfPolling();
+      loadHfAuth();
+    }
+
+    function closeHfModal() {
+      document.getElementById('hfModal').classList.remove('active');
+      stopHfPolling();
+    }
+
+    function toggleHfTokenForm() {
+      const form = document.getElementById('hfTokenForm');
+      form.style.display = form.style.display === 'none' ? 'block' : 'none';
+    }
+
+    function hfShowError(msg) {
+      const el = document.getElementById('hfError');
+      if (!el) return;
+      if (!msg) { el.style.display = 'none'; return; }
+      el.textContent = msg;
+      el.style.display = 'block';
+    }
+
+    function copyHfCode() {
+      const code = document.getElementById('hfUserCode').textContent.trim();
+      if (!code) return;
+      navigator.clipboard.writeText(code).then(() => showToast(`Copied ${code}`));
+    }
+
+    function stopHfPolling() {
+      if (hfPollTimer) { clearTimeout(hfPollTimer); hfPollTimer = null; }
+    }
+
+    async function startHfLogin() {
+      hfShowError('');
+      const btn = document.getElementById('hfLoginBtn');
+      btn.disabled = true;
+      btn.textContent = 'Starting…';
+      try {
+        const res = await fetch('/api/hf/device/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || 'could not start the login');
+        hfDeviceCode = data.device_code;
+        document.getElementById('hfDeviceBox').style.display = 'block';
+        const link = document.getElementById('hfDeviceLink');
+        link.href = `${data.verification_uri}?user_code=${encodeURIComponent(data.user_code)}`;
+        link.textContent = link.href;
+        document.getElementById('hfUserCode').textContent = data.user_code;
+        document.getElementById('hfDeviceStatus').textContent = 'Waiting for approval…';
+        btn.textContent = 'Waiting…';
+        pollHfLogin(Math.max(3, data.interval || 5) * 1000, Date.now() + (data.expires_in || 300) * 1000);
+      } catch (e) {
+        hfShowError(e.message || String(e));
+        btn.disabled = false;
+        btn.textContent = '🤗 Sign in with Hugging Face';
+      }
+    }
+
+    function pollHfLogin(interval, deadline) {
+      stopHfPolling();
+      hfPollTimer = setTimeout(async () => {
+        if (Date.now() > deadline) {
+          document.getElementById('hfDeviceStatus').textContent = 'Code expired — start again.';
+          const btn = document.getElementById('hfLoginBtn');
+          btn.disabled = false; btn.textContent = '🤗 Sign in with Hugging Face';
+          return;
+        }
+        try {
+          const res = await fetch('/api/hf/device/poll', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_code: hfDeviceCode })
+          });
+          const data = await res.json();
+          if (data.status === 'accepted') {
+            document.getElementById('hfDeviceStatus').textContent = 'Approved ✓';
+            await loadHfAuth();
+            showToast(`Signed in to Hugging Face as ${data.user || 'you'}`);
+            const btn = document.getElementById('hfLoginBtn');
+            btn.disabled = false; btn.textContent = '🤗 Sign in with Hugging Face';
+            setTimeout(closeHfModal, 600);
+            return;
+          }
+          if (data.status === 'expired') {
+            document.getElementById('hfDeviceStatus').textContent = 'Code expired — start again.';
+            const btn = document.getElementById('hfLoginBtn');
+            btn.disabled = false; btn.textContent = '🤗 Sign in with Hugging Face';
+            return;
+          }
+          if (data.status === 'denied') {
+            document.getElementById('hfDeviceStatus').textContent = 'Access denied.';
+            const btn = document.getElementById('hfLoginBtn');
+            btn.disabled = false; btn.textContent = '🤗 Sign in with Hugging Face';
+            return;
+          }
+          if (data.status === 'error') hfShowError(data.error || 'login failed');
+          document.getElementById('hfDeviceStatus').textContent = 'Waiting for approval…';
+          pollHfLogin(data.status === 'slow_down' ? interval + 5000 : interval, deadline);
+        } catch (e) {
+          pollHfLogin(interval, deadline);
+        }
+      }, interval);
+    }
+
+    async function submitHfToken() {
+      const input = document.getElementById('hfTokenInput');
+      const token = (input.value || '').trim();
+      if (!token) { hfShowError('Paste a token first.'); return; }
+      hfShowError('');
+      const res = await fetch('/api/hf/token', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token })
+      });
+      const data = await res.json();
+      if (!data.ok) { hfShowError(data.error || 'that token was rejected'); return; }
+      input.value = '';
+      document.getElementById('hfTokenForm').style.display = 'none';
+      await loadHfAuth();
+      showToast(`Signed in to Hugging Face as ${data.user}`);
+      setTimeout(closeHfModal, 500);
+    }
+
+    async function logoutHf() {
+      if (!confirm('Sign out of Hugging Face and remove the stored token from this Mac?')) return;
+      await fetch('/api/hf/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      await loadHfAuth();
+      showToast('Signed out of Hugging Face');
     }
 
     async function openConfigModal() {
@@ -3205,6 +3478,8 @@ INDEX_HTML = """<!DOCTYPE html>
     loadModels();
     loadDrives();
     setInterval(loadDrives, 30000);
+    loadHfAuth();
+    setInterval(loadHfAuth, 60000);
   </script>
 </body>
 </html>
@@ -3216,6 +3491,11 @@ if __name__ == "__main__":
         mlx_helper.protect_model_storage()
     except Exception:
         pass
+    # Watchdog: a stalled transfer must not sit at 0 B/s forever.
+    try:
+        mlx_helper.start_download_watchdog()
+    except Exception as e:
+        print(f"Download watchdog not started: {e}")
     server = ThreadedHTTPServer(("127.0.0.1", PORT), MLXGuiHandler)
     print(f"macOS MLX Control Center GUI Server running at http://127.0.0.1:{PORT}")
     try:
