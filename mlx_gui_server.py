@@ -688,7 +688,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.7.1 (Multi-Drive)</title>
+  <title>macOS MLX Control Center v0.7.2 (Multi-Drive)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1129,7 +1129,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.7.1 (Multi-Drive)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.7.2 (Multi-Drive)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
@@ -1458,6 +1458,7 @@ INDEX_HTML = """<!DOCTYPE html>
       </div>
       <div id="driveModalSubtitle" style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px; line-height: 1.5;"></div>
       <div id="driveModalList" style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; max-height: 380px; overflow-y: auto;"></div>
+      <div id="driveConfirmBar" style="display: none; margin-bottom: 16px;"></div>
       <div style="display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--card-border); padding-top: 14px;">
         <span id="driveModalHint" style="font-size: 11px; color: var(--text-muted);">Drives are detected automatically — plug in a new one and it appears here.</span>
         <button class="btn btn-secondary" onclick="loadDrives(true); renderDriveModalList();">⟳ Refresh Drives</button>
@@ -1840,14 +1841,19 @@ INDEX_HTML = """<!DOCTYPE html>
       const list = document.getElementById('driveModalList');
       if (!list) return;
       const usable = drivesCache.filter(d => d.connected && !d.disabled);
+      const chosen = pendingDownload && pendingDownload.chosenId
+        ? usable.find(d => d.id === pendingDownload.chosenId)
+        : null;
+      renderDriveConfirmBar(chosen);
       list.innerHTML = usable.map(d => {
         const sizeNote = pendingDownload && pendingDownload.neededGb
           ? (d.free_gb >= pendingDownload.neededGb
               ? `<span style="color:#34d399;">fits ${pendingDownload.neededGb} GB download</span>`
               : `<span style="color:#f87171;">too small for ${pendingDownload.neededGb} GB</span>`)
           : `${d.free_gb} GB free of ${d.total_gb} GB`;
+        const isChosen = chosen && chosen.id === d.id;
         return `
-          <div style="display:flex; justify-content:space-between; align-items:center; padding:12px 16px; border-radius:8px; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08);">
+          <div style="display:flex; justify-content:space-between; align-items:center; padding:12px 16px; border-radius:8px; background:${isChosen ? 'rgba(99,102,241,0.18)' : 'rgba(255,255,255,0.04)'}; border:1px solid ${isChosen ? '#6366f1' : 'rgba(255,255,255,0.08)'};">
             <div>
               <strong style="font-size:14px;">${d.internal ? '💻' : '💾'} ${d.name}</strong>
               <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">
@@ -1858,16 +1864,22 @@ INDEX_HTML = """<!DOCTYPE html>
                   : ` · <span style="color:#fbbf24; cursor:pointer; white-space:nowrap;" title="This library is inside your Time Machine backup set — click to exclude it" onclick="excludeDriveBackups('${d.id}')">⚠️ TM ON</span>`}
               </div>
             </div>
-            <button class="btn btn-primary" onclick="chooseDrive('${d.id}')">Download here</button>
+            <button class="btn ${isChosen ? 'btn-secondary' : 'btn-primary'}" onclick="chooseDrive('${d.id}')">${isChosen ? '✓ Selected' : 'Select'}</button>
           </div>`;
       }).join('') || '<div style="color:var(--text-muted); font-size:13px;">No writable APFS/HFS+ drives detected.</div>';
     }
 
     function showDrivePicker(repoId, subfolder, info) {
-      pendingDownload = { repoId, subfolder, neededGb: (info && info.needed_gb) || 0 };
+      pendingDownload = {
+        repoId,
+        subfolder,
+        neededGb: (info && info.needed_gb) || 0,
+        chosenId: null
+      };
       document.getElementById('driveModalSubtitle').innerHTML =
         (info && info.error ? `<span style="color:#f87171;">${info.error}</span><br>` : '') +
-        `Choose a drive for <strong style="color:#60a5fa;">${repoId}</strong>:`;
+        `1. Pick the drive that should hold <strong style="color:#60a5fa;">${repoId}</strong>` +
+        `<br>2. Confirm — nothing downloads until you do.`;
       document.getElementById('driveModal').classList.add('active');
       loadDrives().then(renderDriveModalList);
       renderDriveModalList();
@@ -1875,13 +1887,58 @@ INDEX_HTML = """<!DOCTYPE html>
 
     function closeDriveModal() {
       document.getElementById('driveModal').classList.remove('active');
+      document.getElementById('driveConfirmBar').style.display = 'none';
       pendingDownload = null;
     }
 
     function chooseDrive(driveId) {
+      if (!pendingDownload) return;
+      pendingDownload.chosenId = driveId;
+      renderDriveModalList();
+      const bar = document.getElementById('driveConfirmBar');
+      if (bar) bar.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+
+    function renderDriveConfirmBar(chosen) {
+      const bar = document.getElementById('driveConfirmBar');
+      if (!bar) return;
+      if (!chosen || !pendingDownload) {
+        bar.style.display = 'none';
+        bar.innerHTML = '';
+        return;
+      }
+      const size = pendingDownload.neededGb ? ` (~${pendingDownload.neededGb} GB)` : '';
+      const fits = !pendingDownload.neededGb || chosen.free_gb >= pendingDownload.neededGb;
+      bar.style.display = 'block';
+      bar.innerHTML = `
+        <div style="padding: 14px 16px; border-radius: 10px; background: rgba(52,211,153,0.10); border: 1px solid rgba(52,211,153,0.45);">
+          <div style="font-size: 13px; color: #f3f4f6; margin-bottom: 10px;">
+            Download <strong style="color:#60a5fa;">${pendingDownload.repoId}</strong>${size} to
+            <strong style="color:#34d399;">${chosen.internal ? '💻' : '💾'} ${chosen.name}</strong>?
+            <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
+              ${fits
+                ? `${chosen.free_gb} GB free on that drive`
+                : `<span style="color:#f87171;">only ${chosen.free_gb} GB free — the download will be refused</span>`}
+              · ${chosen.tm_excluded ? '🚫 not in Time Machine backups' : '⚠️ inside Time Machine backups'}
+            </div>
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn btn-primary" onclick="confirmDownload()">✓ Confirm download</button>
+            <button class="btn btn-secondary" onclick="cancelDriveConfirm()">✕ Cancel</button>
+          </div>
+        </div>`;
+    }
+
+    function cancelDriveConfirm() {
+      if (pendingDownload) pendingDownload.chosenId = null;
+      renderDriveModalList();
+    }
+
+    function confirmDownload() {
       const target = pendingDownload;
+      if (!target || !target.chosenId) return;
       closeDriveModal();
-      if (target) executeDownload(target.repoId, target.subfolder, driveId);
+      executeDownload(target.repoId, target.subfolder, target.chosenId);
     }
 
 
@@ -2203,7 +2260,7 @@ INDEX_HTML = """<!DOCTYPE html>
               </div>
 
               <div style="display: flex; gap: 8px;">
-                <button class="btn btn-primary" style="flex: 1;" onclick="closeCompareModal(); downloadRepo('${c.repo_id}')">⚡ Download</button>
+                <button class="btn btn-primary" style="flex: 1;" onclick="closeCompareModal(); downloadRepo('${c.repo_id}')">💾 Download…</button>
                 <a href="${hfUrl}" target="_blank" class="btn btn-secondary" style="padding: 9px 12px; font-size: 12px;">🔗 HF Page</a>
               </div>
             </div>`;
@@ -2733,9 +2790,8 @@ INDEX_HTML = """<!DOCTYPE html>
               </div>
             </div>
             <div class="card-actions">
-              <button class="btn btn-primary" onclick="downloadRepo('${r.id}')">⚡ Download</button>
-              <button class="btn btn-secondary" style="padding: 9px 12px; font-size: 12px; white-space: nowrap;" title="Choose which drive to save this model to"
-                      onclick="showDrivePicker('${r.id}', '', { needed_gb: ${r.est_ram_gb ? Math.round(r.est_ram_gb * 0.8) : 0} })">💾 Save to…</button>
+              <button class="btn btn-primary" style="flex: 1;" title="Choose a drive, confirm, then download"
+                      onclick="downloadRepo('${r.id}', '', { needed_gb: ${r.est_ram_gb ? Math.round(r.est_ram_gb * 0.8) : 0} })">💾 Download…</button>
               <a href="${hfUrl}" target="_blank" class="btn btn-secondary" style="padding: 9px 12px; font-size: 12px;">🔗 HF Page</a>
             </div>
           </div>`;
@@ -2941,7 +2997,7 @@ INDEX_HTML = """<!DOCTYPE html>
       document.getElementById('quantModal').classList.remove('active');
     }
 
-    function showQuantModal(repoId, variants) {
+    function showQuantModal(repoId, variants, info = {}) {
       document.getElementById('quantModalSubtitle').innerHTML = `
         Repository <strong style="color: #60a5fa;">${repoId}</strong> bundles multiple subfolder quantizations. Select a specific bit precision below to download only that model (saving dozens of GBs!):
       `;
@@ -2956,8 +3012,8 @@ INDEX_HTML = """<!DOCTYPE html>
               <strong style="font-size: 14px; color: ${isRec ? '#a5b4fc' : '#f3f4f6'};">${v.label}</strong>
               <div style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">Subfolder: <code>${v.subfolder}</code> | Size: <strong style="color: #34d399;">${v.size_str}</strong></div>
             </div>
-            <button class="btn ${isRec ? 'btn-primary' : 'btn-secondary'}" onclick="closeQuantModal(); executeDownload('${repoId}', '${v.subfolder}')">
-              ⚡ Download ${v.subfolder}
+            <button class="btn ${isRec ? 'btn-primary' : 'btn-secondary'}" onclick="closeQuantModal(); downloadRepo('${repoId}', '${v.subfolder}', ${JSON.stringify(info)})">
+              💾 Download ${v.subfolder}
             </button>
           </div>
         `;
@@ -2965,7 +3021,7 @@ INDEX_HTML = """<!DOCTYPE html>
 
       document.getElementById('quantDownloadAllBtn').onclick = () => {
         closeQuantModal();
-        executeDownload(repoId, '');
+        showDrivePicker(repoId, '', info);
       };
 
       document.getElementById('quantModal').classList.add('active');
@@ -3011,9 +3067,10 @@ INDEX_HTML = """<!DOCTYPE html>
       el._timer = setTimeout(() => { el.style.display = 'none'; }, 4200);
     }
 
-    async function downloadRepo(repoId, subfolder = '') {
+    // Every download starts here: pick a drive, confirm, then transfer.
+    async function downloadRepo(repoId, subfolder = '', info = {}) {
       if (subfolder || repoId.includes('/tree/') || repoId.includes(':') || repoId.includes('/blob/')) {
-        executeDownload(repoId, subfolder);
+        showDrivePicker(repoId, subfolder, info);
         return;
       }
 
@@ -3022,14 +3079,14 @@ INDEX_HTML = """<!DOCTYPE html>
         const res = await fetch(`/api/repo_variants?repo_id=${encodeURIComponent(repoId)}`);
         const data = await res.json();
         if (data.variants && data.variants.length > 0) {
-          showQuantModal(repoId, data.variants);
+          showQuantModal(repoId, data.variants, info);
           return;
         }
       } catch (e) {
         console.warn("Could not check repo variants:", e);
       }
 
-      executeDownload(repoId, '');
+      showDrivePicker(repoId, subfolder, info);
     }
 
     async function pauseDownload(pid, repoId, subfolder = '') {

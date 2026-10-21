@@ -1,5 +1,5 @@
 
-# ⚡ macOS MLX Control Center `v0.7.1` (Multi-Drive Model Libraries Edition)
+# ⚡ macOS MLX Control Center `v0.7.2` (Multi-Drive Model Libraries Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -38,7 +38,7 @@ curl -sSL https://raw.githubusercontent.com/cjtsh/mac-mlx-control-center/main/in
 
 Most local LLM runners are either overly complex, hog system menubars, or require manual hand-editing of configuration JSON files for coding tools. **macOS MLX Control Center** solves this with:
 
-* 💾 **Multi-Drive Model Libraries (v0.7)**: Every writable APFS/HFS+ drive is discovered automatically and each one becomes a model library at `<drive>/MLX-Models/hub`. Pick a **Download to:** drive in the toolbar or per model with the **💾 Save to…** button, keep 70–100 GB models off your boot SSD, and see a live per-drive inventory (models, free space, offline drives) on the Downloaded Models tab. Includes a free-space guard, absolute-path launching, and the `./mlx.sh drives` / `./mlx.sh use-drive` / `./mlx.sh download <repo> --to <drive>` CLI.
+* 💾 **Multi-Drive Model Libraries (v0.7)**: Every writable APFS/HFS+ drive is discovered automatically and each one becomes a model library at `<drive>/MLX-Models/hub`. Pick a **Download to:** drive in the toolbar or per model with the **💾 Save to…** button, keep 70–100 GB models off your boot SSD (pick a drive, confirm, then it downloads), and see a live per-drive inventory (models, free space, offline drives) on the Downloaded Models tab. Includes a free-space guard, absolute-path launching, and the `./mlx.sh drives` / `./mlx.sh use-drive` / `./mlx.sh download <repo> --to <drive>` CLI.
 * 🎛️ **Combinable Search Filters + Any-Bit Quant (v0.6)**: The `⚡ MLX Models`, `👁️ Vision & Multimodal` and `💻 Code Models` chips are independent toggles that combine with AND, and a new **Quant** dropdown filters by **2, 3, 4, 5, 6, 8 or 16-bit** (instead of 4-bit only). Stack them with the RAM budget: *"MLX + Code + 8-bit + Fits My Mac"* in three clicks.
 * 🧠 **Accurate RAM Estimates & RAM Budget Filter (v0.5)**: Search cards now show real weight sizes and parameter counts pulled from Hugging Face (`safetensors` blobs + `safetensors.total`) and estimate RAM as `weights × 1.06 + KV cache + 1.5 GB`. A new **RAM Budget** dropdown (Fits My Mac / 8–192 GB / Any Size) hides models that can't run on your Mac, with 🟢/🟡/🔴 fit badges and Smallest/Largest RAM sorting.
 * 👁️ **Vision & Multimodal Image Recognition (v0.4)**: Full native integration with `mlx-vlm`! Run Gemma 4, Qwen 2.5/3.8 VL, PaliGemma, Pixtral, LLaVA, SmolVLM, and more with full image analysis, OCR, visual question answering, and chart understanding.
@@ -118,7 +118,7 @@ A 70–100 GB model does not have to live on your boot SSD. **macOS MLX Control 
 * **Nothing to configure.** Every writable APFS/HFS+ volume with at least 8 GB is discovered from the mount table: your boot drive, internal second SSDs, and any Thunderbolt/USB drive you plug in. Time Machine destinations, read-only DMGs (installers like "Install ChatGPT") and tiny volumes are skipped automatically.
 * **One folder per drive.** Models are stored in Hugging Face cache layout at `<drive>/MLX-Models/hub/models--org--repo/…`. Your boot drive uses `~/MLX-Models/hub` instead, so the sealed system volume is never touched.
 * **Smart default.** External drives win: the default target is the external drive with the most free space, remembered in `~/.mlx_pids/storage.json`. Change it any time with the **Download to:** dropdown next to the RAM Budget, or `./mlx.sh use-drive <name>`.
-* **Pick per model.** The **💾 Save to…** button on any search card opens a drive picker that shows free space per drive and warns when a model will not fit (`too small for 18 GB`).
+* **One button, one confirmation.** Every download starts with the single blue **💾 Download…** button: pick the drive (free space, `TM off` state and a `too small for N GB` warning per drive), then confirm — `Download <repo> (~7 GB) to 💾 TBolt-1TB-Fun?` — before a single byte moves. Nothing is written to a drive you did not confirm.
 * **Free-space guard.** Downloads are refused with `insufficient_space` (GUI toast / HTTP 409) or a CLI prompt when the target drive is too small — no half-written 100 GB downloads.
 * **Absolute-path launching.** A model on an external drive starts as `mlx_lm.server --model /Volumes/<drive>/MLX-Models/hub/models--…/snapshots/<rev>`, so the engine never depends on the working directory.
 * **Live inventory.** The Downloaded Models tab shows one line per drive (`💾 TBolt-1TB-Fun: 3 models · 612 GB free`) and every model card is labelled with the drive it lives on. Drives that are unplugged keep their models listed as offline instead of vanishing.

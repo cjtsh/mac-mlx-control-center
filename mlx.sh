@@ -1393,7 +1393,7 @@ main_menu() {
     while true; do
         clear 2>/dev/null || true
         echo "╔════════════════════════════════════════════════════════════╗"
-        echo "║       MLX Model Control Center v0.7.1 (Multi-Drive)        ║"
+        echo "║       MLX Model Control Center v0.7.2 (Multi-Drive)        ║"
         echo "╚════════════════════════════════════════════════════════════╝"
         show_running_header
         echo "  1. List Downloaded Models (Select # to Launch)"
