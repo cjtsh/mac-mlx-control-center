@@ -1,5 +1,5 @@
 
-# ⚡ macOS MLX Control Center `v0.5` (Vision, Multimodal & Accurate RAM Edition)
+# ⚡ macOS MLX Control Center `v0.6` (Combinable Filters, Quant & Accurate RAM Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -38,6 +38,7 @@ curl -sSL https://raw.githubusercontent.com/cjtsh/mac-mlx-control-center/main/in
 
 Most local LLM runners are either overly complex, hog system menubars, or require manual hand-editing of configuration JSON files for coding tools. **macOS MLX Control Center** solves this with:
 
+* 🎛️ **Combinable Search Filters + Any-Bit Quant (v0.6)**: The `⚡ MLX Models`, `👁️ Vision & Multimodal` and `💻 Code Models` chips are independent toggles that combine with AND, and a new **Quant** dropdown filters by **2, 3, 4, 5, 6, 8 or 16-bit** (instead of 4-bit only). Stack them with the RAM budget: *"MLX + Code + 8-bit + Fits My Mac"* in three clicks.
 * 🧠 **Accurate RAM Estimates & RAM Budget Filter (v0.5)**: Search cards now show real weight sizes and parameter counts pulled from Hugging Face (`safetensors` blobs + `safetensors.total`) and estimate RAM as `weights × 1.06 + KV cache + 1.5 GB`. A new **RAM Budget** dropdown (Fits My Mac / 8–192 GB / Any Size) hides models that can't run on your Mac, with 🟢/🟡/🔴 fit badges and Smallest/Largest RAM sorting.
 * 👁️ **Vision & Multimodal Image Recognition (v0.4)**: Full native integration with `mlx-vlm`! Run Gemma 4, Qwen 2.5/3.8 VL, PaliGemma, Pixtral, LLaVA, SmolVLM, and more with full image analysis, OCR, visual question answering, and chart understanding.
 * 🖼️ **Interactive Vision Test Chat (v0.4)**: Upload and preview images directly in the GUI test bench to test OpenAI-compatible multimodal payloads.
@@ -85,6 +86,25 @@ Prefer working in the terminal? You can also use `mlx.sh` directly:
 
 ---
 
+## 🎛️ Combinable Search Filters & Quant Selector (New in v0.6)
+
+The old chips were **presets**: clicking `👁️ Vision & Multimodal` replaced `⚡ MLX Models`, so "MLX vision models" was impossible, and `🎯 4-Bit Quantized` was hard-wired to one bit width.
+
+Now the chips are **toggles** and every filter combines with AND:
+
+| You want | Click |
+|---|---|
+| MLX models only | ⚡ MLX Models |
+| Vision models that run in MLX | ⚡ MLX Models + 👁️ Vision & Multimodal |
+| 8-bit coding models for your Mac | ⚡ MLX Models + 💻 Code Models, **Quant: 8-bit**, RAM Budget: Fits My Mac |
+| Everything on Hugging Face | 🌐 All HF Repos (clears every chip) |
+
+The **Quant** dropdown accepts **2, 3, 4, 5, 6, 8 and 16-bit**. Matching uses the repo name first (`-4bit`, `q8`, `8-bit`) for instant narrowing, then the repo's real `config.quantization_config.bits` once sizes arrive, so quantization-in-config repos are filtered correctly too. The header line tells you the active combination, e.g. `Filter: MLX + CODE + 4-bit`.
+
+CLI equivalent: `./mlx.sh search <query> [ram_gb] [tags] [quant]`, e.g. `./mlx.sh search coder 32 mlx,code 4`.
+
+---
+
 ## 🧠 Accurate RAM Estimates & RAM Budget Filter (New in v0.5)
 
 Search cards now show **real numbers fetched from Hugging Face** instead of guessing from the repository name:
@@ -105,21 +125,6 @@ The search bar has a new **RAM Budget** selector:
 Badges are computed against the current budget: 🟢 **Fits Smoothly** (≤ 80%), 🟡 **Tight Fit** (≤ 100%), 🔴 **Too Large** (shows required vs. usable RAM). Sort by **Smallest / Largest RAM First** to find the right size instantly.
 
 Sizes are fetched in a fast second pass (`/api/repo_sizes`) and cached, so repeat searches are instant.
-
-### Combinable filters + any quantization
-
-The chips are **toggles, not presets** — click as many as you like and they combine with AND:
-
-| You want | Click |
-|---|---|
-| MLX models only | ⚡ MLX Models |
-| Vision models that run in MLX | ⚡ MLX Models + 👁️ Vision & Multimodal |
-| 8-bit coding models for your Mac | ⚡ MLX Models + 💻 Code Models, **Quant: 8-bit**, RAM Budget: Fits My Mac |
-| Everything on Hugging Face | 🌐 All HF Repos (clears every chip) |
-
-The **Quant** dropdown next to RAM Budget accepts **2, 3, 4, 5, 6, 8 and 16-bit** (previously the only quant chip was hard-wired to "4-bit"). Matching uses the repo name first (`-4bit`, `q8`, `8-bit`) and then the repo's real `config.quantization_config.bits` once sizes arrive, so quantization-in-config repos are filtered correctly too. The header line tells you the active combination, e.g. `Filter: MLX + CODE + 4-bit`.
-
-CLI equivalent: `./mlx.sh search <query> [ram_gb] [tags] [quant]`, e.g. `./mlx.sh search coder 32 mlx,code 4`.
 
 ---
 
