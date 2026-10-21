@@ -1190,50 +1190,83 @@ def _enrich_search_results(results, workers=12, usable_ram_gb=None):
     return results
 
 
+def _repo_mentions_code(repo_id):
+    return bool(re.search(r"code|coder|coding|sql|python-", (repo_id or "").lower()))
+
+
 def search_hf_api(query, limit=50, sort="downloads", direction=-1, filter_tag="mlx",
-                  max_ram=None, min_ram=None, usable_ram_gb=None, enrich=True):
+                  filter_tags=None, quant=None, max_ram=None, min_ram=None,
+                  usable_ram_gb=None, enrich=True):
+    """Search Hugging Face with COMBINABLE filters.
+
+    filter_tags: list/set of any of {"mlx", "vision", "code"} — all must match (AND).
+    quant: one of "2","3","4","5","6","8","16" — keep repos whose quantization
+           matches, based on the repo name first and the real config once enriched.
+    """
+    if filter_tags is None:
+        filter_tags = [filter_tag] if filter_tag else []
+    tags = {str(t).strip().lower() for t in filter_tags if t and str(t).strip().lower() != "all"}
+
     q = urllib.parse.quote(query)
     size_sort = sort in ("size_asc", "size_desc")
     api_sort = "downloads" if size_sort else sort
-    if filter_tag == "vision":
-        url = f"https://huggingface.co/api/models?search={q}&pipeline_tag=image-text-to-text&limit={limit}&sort={api_sort}&direction={direction}"
-    elif filter_tag and filter_tag != "all":
-        url = f"https://huggingface.co/api/models?search={q}&limit={limit}&sort={api_sort}&direction={direction}&filter={filter_tag}"
-    else:
-        url = f"https://huggingface.co/api/models?search={q}&limit={limit}&sort={api_sort}&direction={direction}"
+    quant = str(quant).strip() if quant else ""
+    # Over-fetch when we post-filter (code / quant) so the page still fills up
+    fetch_limit = limit
+    if quant or "code" in tags:
+        fetch_limit = min(limit * 4, 400)
+
+    params = [f"search={q}", f"limit={fetch_limit}", f"sort={api_sort}", f"direction={direction}"]
+    if "mlx" in tags:
+        params.append("filter=mlx")
+    if "vision" in tags:
+        params.append("pipeline_tag=image-text-to-text")
+    url = "https://huggingface.co/api/models?" + "&".join(params)
 
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     results = []
     try:
-        with urllib.request.urlopen(req, timeout=6) as resp:
+        with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode())
             for item in data:
                 repo_id = item.get("id", "")
-                tags = item.get("tags", [])
+                if "code" in tags and not _repo_mentions_code(repo_id):
+                    continue
+                item_tags = item.get("tags", [])
                 pipeline_tag = item.get("pipeline_tag", "text-generation")
-                is_vis = is_vision_model(repo_id) or pipeline_tag == "image-text-to-text" or "vision" in tags or "multimodal" in tags
+                is_vis = is_vision_model(repo_id) or pipeline_tag == "image-text-to-text" or "vision" in item_tags or "multimodal" in item_tags
+                if "vision" in tags and not is_vis:
+                    continue
+                q_label = _detect_quant_label(repo_id)
+                if quant and q_label and q_label != f"{quant}-bit":
+                    continue
                 results.append({
                     "id": repo_id,
                     "downloads": item.get("downloads", 0),
                     "likes": item.get("likes", 0),
                     "lastModified": item.get("lastModified", "")[:10] if item.get("lastModified") else "",
-                    "tags": tags[:4],
+                    "tags": item_tags[:4],
                     "est_ram_gb": estimate_ram_from_name(repo_id),
                     "size_known": False,
+                    "quant": q_label,
                     "pipeline_tag": pipeline_tag,
                     "is_vision": is_vis
                 })
+                if len(results) >= limit:
+                    break
     except Exception:
         pass
 
     if results and enrich:
         results = _enrich_search_results(results, usable_ram_gb=usable_ram_gb)
+        if quant:
+            results = [r for r in results if not r.get("quant") or r["quant"] == f"{quant}-bit"]
         if max_ram:
             results = [r for r in results if not r.get("est_ram_gb") or r["est_ram_gb"] <= float(max_ram)]
         if min_ram:
             results = [r for r in results if not r.get("est_ram_gb") or r["est_ram_gb"] >= float(min_ram)]
-        if size_sort:
-            results.sort(key=lambda r: r.get("est_ram_gb") or 0.0, reverse=(sort == "size_desc"))
+    if size_sort and results:
+        results.sort(key=lambda r: r.get("est_ram_gb") or 0.0, reverse=(sort == "size_desc"))
     return results
 
 def compare_models_ai(repo_ids):
@@ -1381,7 +1414,10 @@ if __name__ == "__main__":
     elif cmd == "search_hf":
         q = sys.argv[2] if len(sys.argv) > 2 else "mlx"
         mr = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] else None
-        print(json.dumps(search_hf_api(q, max_ram=mr)))
+        tags_arg = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else "mlx"
+        qt = sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] else None
+        print(json.dumps(search_hf_api(q, filter_tags=[t for t in tags_arg.split(",") if t],
+                                       quant=qt, max_ram=mr)))
     elif cmd == "repo_size":
         print(json.dumps(fetch_repo_size_info(sys.argv[2] if len(sys.argv) > 2 else "")))
     elif cmd == "free_port":

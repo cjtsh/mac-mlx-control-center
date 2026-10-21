@@ -142,13 +142,18 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             limit = int(query.get("limit", ["50"])[0])
             sort = query.get("sort", ["downloads"])[0]
             filter_tag = query.get("filter", ["mlx"])[0]
+            tags_raw = query.get("tags", [filter_tag])[0]
+            filter_tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
+            quant = query.get("quant", [""])[0].strip()
             max_ram = float(query.get("max_ram", ["0"])[0] or 0) or None
             usable = mlx_helper.get_usable_ram_gb()
-            results = mlx_helper.search_hf_api(q, limit=limit, sort=sort, filter_tag=filter_tag,
+            results = mlx_helper.search_hf_api(q, limit=limit, sort=sort, filter_tags=filter_tags,
+                                               quant=quant or None,
                                                max_ram=max_ram, usable_ram_gb=usable, enrich=False)
             stats = mlx_helper.get_system_stats()
             self.send_json({"results": results, "free_ram_gb": stats.get("free_ram_gb", 16.0),
-                            "usable_ram_gb": usable, "total_ram_gb": stats.get("total_ram_gb", 0)})
+                            "usable_ram_gb": usable, "total_ram_gb": stats.get("total_ram_gb", 0),
+                            "tags": filter_tags, "quant": quant})
         elif path == "/api/repo_sizes":
             ids = query.get("ids", [""])[0]
             repo_ids = [i.strip() for i in ids.split(",") if i.strip()][:80]
@@ -1170,14 +1175,14 @@ INDEX_HTML = """<!DOCTYPE html>
       <button class="btn btn-warning" style="padding: 14px 18px; font-size: 14px;" onclick="clearCompareSelection()">🧹 Clear Checkmarks</button>
     </div>
 
-    <!-- FILTER & SORT BAR -->
+    <!-- FILTER & SORT BAR (filters combine with AND — e.g. MLX + Vision + 8-bit + Code) -->
     <div class="filter-bar">
-      <div class="chip active" id="filter-mlx" onclick="setFilter('mlx')">⚡ MLX Models (Default)</div>
-      <div class="chip" id="filter-vision" onclick="setFilter('vision')">👁️ Vision & Multimodal</div>
-      <div class="chip" id="filter-4bit" onclick="setFilter('4bit')">🎯 4-Bit Quantized</div>
-      <div class="chip" id="filter-code" onclick="setFilter('code')">💻 Code Models</div>
-      <div class="chip" id="filter-all" onclick="setFilter('all')">🌐 All HF Repos</div>
-      
+      <div class="chip active" id="chip-mlx" onclick="toggleTag('mlx')" title="Click to combine with the other filters">⚡ MLX Models</div>
+      <div class="chip" id="chip-vision" onclick="toggleTag('vision')" title="Combine freely: MLX + Vision + 8-bit + Code">👁️ Vision & Multimodal</div>
+      <div class="chip" id="chip-code" onclick="toggleTag('code')" title="Combine freely with MLX, Vision and Quant">💻 Code Models</div>
+      <div class="chip" id="chip-all" onclick="clearTags()" title="Clear every filter and search all of Hugging Face">🌐 All HF Repos</div>
+      <span id="filterHint" style="font-size: 11px; color: var(--text-muted); align-self: center; margin-left: 2px;"></span>
+
       <div style="margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
         <span style="font-size: 12px; color: var(--text-muted);">Sort By:</span>
         <select id="sortSelect" onchange="doSearch()" style="padding: 6px 12px !important; font-size: 12px !important;">
@@ -1190,6 +1195,18 @@ INDEX_HTML = """<!DOCTYPE html>
         <select id="limitSelect" onchange="doSearch()" style="padding: 6px 12px !important; font-size: 12px !important;">
           <option value="50">50 Results</option>
           <option value="100">100 Results</option>
+        </select>
+        <span style="font-size: 12px; color: var(--text-muted); margin-left: 4px;">Quant:</span>
+        <select id="quantSelect" onchange="doSearch()" title="Filter by quantization level"
+                style="padding: 6px 12px !important; font-size: 12px !important;">
+          <option value="">Any</option>
+          <option value="2">2-bit</option>
+          <option value="3">3-bit</option>
+          <option value="4">4-bit</option>
+          <option value="5">5-bit</option>
+          <option value="6">6-bit</option>
+          <option value="8">8-bit</option>
+          <option value="16">16-bit</option>
         </select>
         <span style="font-size: 12px; color: var(--text-muted); margin-left: 4px;">RAM Budget:</span>
         <select id="ramSelect" onchange="renderSearchCards(currentSearchQuery)" title="Only show models that fit within this much RAM"
@@ -1621,7 +1638,8 @@ INDEX_HTML = """<!DOCTYPE html>
     let activeServers = [];
     let activeDownloads = [];
     let targetModelForLaunch = '';
-    let currentFilter = 'mlx';
+    // Filters combine with AND: any subset of {mlx, vision, code} plus one quant level
+    let activeTags = new Set(['mlx']);
     let currentFreeRam = 16.0;
     let currentUsableRam = 16.0;
     let currentTotalRam = 0;
@@ -2247,15 +2265,60 @@ INDEX_HTML = """<!DOCTYPE html>
       }
     }
 
-    function setFilter(tag) {
-      currentFilter = tag;
-      document.querySelectorAll('.chip').forEach(el => el.classList.remove('active'));
-      const chip = document.getElementById('filter-' + tag);
-      if (chip) chip.classList.add('active');
+    function toggleTag(tag) {
+      if (activeTags.has(tag)) {
+        activeTags.delete(tag);
+      } else {
+        activeTags.add(tag);
+      }
+      syncChipState();
       doSearch();
     }
 
+    function clearTags() {
+      activeTags.clear();
+      syncChipState();
+      doSearch();
+    }
+
+    function syncChipState() {
+      ['mlx', 'vision', 'code'].forEach(t => {
+        const el = document.getElementById('chip-' + t);
+        if (el) el.classList.toggle('active', activeTags.has(t));
+      });
+      const allChip = document.getElementById('chip-all');
+      if (allChip) allChip.classList.toggle('active', activeTags.size === 0);
+      const hint = document.getElementById('filterHint');
+      if (hint) {
+        const parts = [...activeTags].map(t => t === 'mlx' ? 'MLX' : t === 'vision' ? 'Vision' : 'Code');
+        const q = document.getElementById('quantSelect') ? document.getElementById('quantSelect').value : '';
+        if (q) parts.push(q + '-bit');
+        hint.innerText = parts.length ? 'AND: ' + parts.join(' + ') : '';
+      }
+    }
+
+    function quantFilterValue() {
+      const sel = document.getElementById('quantSelect');
+      return sel ? sel.value : '';
+    }
+
+    // Does the repo name advertise this bit width? (used before real sizes arrive)
+    function nameSuggestsQuant(repoId, bits) {
+      const rid = (repoId || '').toLowerCase();
+      if (new RegExp(`(^|[^0-9])${bits}[ ._-]?bit`).test(rid)) return true;
+      if (new RegExp(`(^|[^a-z0-9])q${bits}([^0-9]|$)`).test(rid)) return true;
+      return false;
+    }
+
+    function matchesQuant(r, bits) {
+      if (!bits) return true;
+      if (r.quant) return r.quant === bits + '-bit';
+      if (r.size_known) return false; // real quant known and it differs
+      return nameSuggestsQuant(r.id, bits);
+    }
+
     async function doSearch() {
+      syncChipState();
       const query = (document.getElementById('searchInput').value || 'gemma 4').trim();
       const sort = document.getElementById('sortSelect').value || 'downloads';
       const limit = document.getElementById('limitSelect').value || '50';
@@ -2313,7 +2376,9 @@ INDEX_HTML = """<!DOCTYPE html>
         return;
       }
 
-      const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&sort=${sort}&limit=${limit}&filter=${currentFilter}`);
+      const quant = quantFilterValue();
+      const tagsParam = [...activeTags].join(',');
+      const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&sort=${sort}&limit=${limit}&tags=${encodeURIComponent(tagsParam)}&quant=${encodeURIComponent(quant)}`);
       const data = await res.json();
       currentFreeRam = data.free_ram_gb || currentFreeRam;
       if (data.usable_ram_gb) {
@@ -2375,13 +2440,16 @@ INDEX_HTML = """<!DOCTYPE html>
       const metaHeader = document.getElementById('searchMetaHeader');
       const budget = getRamBudget();
 
-      let shown = searchResults.filter(r => !budget || !r.est_ram_gb || r.est_ram_gb <= budget);
+      const qBits = quantFilterValue();
+      let shown = searchResults.filter(r => (!budget || !r.est_ram_gb || r.est_ram_gb <= budget) && matchesQuant(r, qBits));
       const sortMode = document.getElementById('sortSelect').value;
       if (sortMode === 'size_asc') shown = shown.slice().sort((a, b) => (a.est_ram_gb || 1e9) - (b.est_ram_gb || 1e9));
       if (sortMode === 'size_desc') shown = shown.slice().sort((a, b) => (b.est_ram_gb || 0) - (a.est_ram_gb || 0));
 
       const budgetTxt = budget ? `RAM budget: ${budget} GB` : 'RAM budget: any';
-      metaHeader.innerText = `Showing ${shown.length} of ${searchResults.length} repos for '${query}' (Filter: ${currentFilter.toUpperCase()} | ${budgetTxt}${currentTotalRam ? ' of ' + currentTotalRam + ' GB total' : ''})`;
+      const filterTxt = activeTags.size ? [...activeTags].map(t => t.toUpperCase()).join(' + ') : 'ALL HF';
+      const qTxt = quantFilterValue() ? ` + ${quantFilterValue()}-bit` : '';
+      metaHeader.innerText = `Showing ${shown.length} of ${searchResults.length} repos for '${query}' (Filter: ${filterTxt}${qTxt} | ${budgetTxt}${currentTotalRam ? ' of ' + currentTotalRam + ' GB total' : ''})`;
       resultsGrid.innerHTML = '';
 
       if (shown.length === 0) {

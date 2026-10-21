@@ -171,20 +171,38 @@ def repo_size_info(repo_id):
     except Exception:
         return {"weights_gb": 0.0, "params_b": _params_from_name(repo_id), "est_ram_gb": 0.0}
 
-def search_hf_api(query, limit=15, max_ram=None):
+def search_hf_api(query, limit=15, max_ram=None, filter_tags=None, quant=None):
     q = urllib.parse.quote(query)
-    url = f"https://huggingface.co/api/models?search={q}&limit={limit}&sort=downloads&direction=-1"
+    tags = {str(t).strip().lower() for t in (filter_tags or []) if t and str(t).strip().lower() != "all"}
+    params = [f"search={q}", f"limit={limit if not (quant or 'code' in tags) else limit * 4}", "sort=downloads", "direction=-1"]
+    if "mlx" in tags:
+        params.append("filter=mlx")
+    if "vision" in tags:
+        params.append("pipeline_tag=image-text-to-text")
+    url = "https://huggingface.co/api/models?" + "&".join(params)
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     results = []
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode())
             for item in data:
+                rid = item.get("id", "")
+                if "code" in tags and not __import__("re").search(r"code|coder|coding", rid.lower()):
+                    continue
+                ql = ""
+                m = __import__("re").search(r"(?<![0-9])([2-8])[ ._-]?bit", rid.lower())
+                if m:
+                    ql = m.group(1) + "-bit"
+                if quant and ql and ql != f"{quant}-bit":
+                    continue
                 results.append({
-                    "id": item.get("id", ""),
+                    "id": rid,
                     "downloads": item.get("downloads", 0),
-                    "likes": item.get("likes", 0)
+                    "likes": item.get("likes", 0),
+                    "quant": ql
                 })
+                if len(results) >= limit:
+                    break
     except Exception:
         pass
     if results:
@@ -219,7 +237,9 @@ if __name__ == "__main__":
     elif cmd == "search_hf":
         q = sys.argv[2] if len(sys.argv) > 2 else "mlx"
         mr = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] else None
-        print(json.dumps(search_hf_api(q, max_ram=mr)))
+        tg = [t for t in (sys.argv[4] if len(sys.argv) > 4 else "mlx").split(",") if t]
+        qt = sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] else None
+        print(json.dumps(search_hf_api(q, max_ram=mr, filter_tags=tg, quant=qt)))
     elif cmd == "free_port":
         p = sys.argv[2] if len(sys.argv) > 2 else "9999"
         print(find_free_port(p))
@@ -315,13 +335,30 @@ for i, m in enumerate(models, 1):
 search_hf() {
     local query="${1:-}"
     local max_ram="${2:-}"
+    local tags="${3:-}"
+    local quant="${4:-}"
     if [ -z "$query" ]; then
         echo ""
         echo -n "Enter search term for Hugging Face (e.g. mlx, qwen, llama) [default: mlx] (b: Back, e: Exit): "
         read -r query
         check_nav "$query" || return
         [ -z "$query" ] && query="mlx"
+
+        echo -n "Filters, combinable (mlx,vision,code | all) [Enter = mlx]: "
+        read -r tags
+        check_nav "$tags" || return
+        [ -z "$tags" ] && tags="mlx"
+
+        echo -n "Quantization (2,4,6,8,16 | Enter = any): "
+        read -r quant
+        check_nav "$quant" || return
     fi
+    case "$tags" in
+        all|"") tags="" ;;
+    esac
+    case "$quant" in
+        any|all) quant="" ;;
+    esac
 
     # How much unified memory can a model actually use on this Mac?
     local usable_ram
@@ -340,14 +377,14 @@ search_hf() {
 
     echo ""
     if [ -n "$max_ram" ]; then
-        echo "Searching Hugging Face for '$query' (RAM budget: ${max_ram} GB)..."
+        echo "Searching Hugging Face for '$query' (filters: ${tags:-ALL}${quant:+ | ${quant}-bit} | RAM budget: ${max_ram} GB)..."
     else
-        echo "Searching Hugging Face for '$query' (no RAM budget)..."
+        echo "Searching Hugging Face for '$query' (filters: ${tags:-ALL}${quant:+ | ${quant}-bit} | no RAM budget)..."
     fi
     echo "---------------------------------------------------------"
 
     local results_json
-    results_json=$(python3 "$HELPER_PY" search_hf "$query" "$max_ram")
+    results_json=$(python3 "$HELPER_PY" search_hf "$query" "$max_ram" "${tags:-mlx}" "$quant")
 
     local count
     count=$(echo "$results_json" | python3 -c "import sys, json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)
@@ -1058,7 +1095,7 @@ case "${1:-}" in
     start) start_model "${2:-}" ;;
     stop|kill) stop_model "${2:-}" ;;
     list) list_models false ;;
-    search) search_hf "${2:-}" "${3:-}" ;;
+    search) search_hf "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
     download) download_model "${2:-}" ;;
     delete) delete_model ;;
     status|running) view_health ;;

@@ -49,7 +49,7 @@ Most local LLM runners are either overly complex, hog system menubars, or requir
 * 🟢 **Activity Monitor-Aligned RAM Accounting (v0.3)**: Accurate unified memory metrics matching Activity Monitor, `htop`, and `mactop`.
 * 🚀 **1-Click Model Launching & Hot Swapping**: Instantly switch between MLX models without terminal commands.
 * 📦 **Multi-Quant & Subfolder HF Support**: Direct support for repositories with multiple quantizations (e.g. `orcarouter/Qwen3.8-27B-Uncensored-MLX/tree/main/4-bit`). Pick exact bit precision (`2-bit`, `4-bit`, `6-bit`, `8-bit`) and download only the weights you need instead of 80+ GB!
-* 🌐 **Supercharged Hugging Face Search**: Search thousands of model weights directly with instant filter chips (`⚡ MLX Models`, `👁️ Vision & Multimodal`, `🎯 4-Bit Quantized`, `💻 Code Models`) and sorting (`Most Downloads`, `Most Liked`, `Recently Updated`).
+* 🌐 **Supercharged Hugging Face Search**: Search thousands of model weights directly with **combinable filter chips** (`⚡ MLX Models`, `👁️ Vision & Multimodal`, `💻 Code Models` — click several, they AND together), a **Quant** selector (2/3/4/5/6/8/16-bit), and sorting (`Most Downloads`, `Most Liked`, `Recently Updated`, `Smallest / Largest RAM First`).
 * 🤖 **Built-In AI Model Comparison Engine**: Select 2 to 4 models to generate an instant technical breakdown comparing quantization precision (`2bit-DQ`, `OptiQ-4bit`), RAM compatibility, and specialization — *works 100% locally out-of-the-box with zero API keys or accounts required!*
 * 🟢 **"Can I Run It?" Apple Silicon RAM Calculator**: Live color-coded RAM budget badges (`🟢 Fits Smoothly`, `🟡 High RAM Pressure`, `🔴 Swap Danger`) computed against your Mac's actual available memory.
 * 🤖 **Auto-Sync Pi Code & OpenCode Agents**: Automatically configures [Pi Code](https://github.com/) and [OpenCode](https://github.com/) under provider `MyMac` (`http://127.0.0.1:9999/v1`). Whenever you swap models in the GUI, your coding agents automatically route to the newly loaded model!
@@ -79,7 +79,7 @@ Prefer working in the terminal? You can also use `mlx.sh` directly:
 
 ### Key CLI Commands:
 * `./mlx.sh list`: View all downloaded local models and RAM sizes.
-* `./mlx.sh search <query> [ram_gb]`: Search Hugging Face repositories directly from terminal (e.g. `./mlx.sh search qwen 32` shows only models that fit in 32 GB; prompts for a budget when omitted).
+* `./mlx.sh search <query> [ram_gb] [tags] [quant]`: Search Hugging Face repositories directly from terminal (e.g. `./mlx.sh search qwen 32` shows only models that fit in 32 GB; `./mlx.sh search coder 32 mlx,code 4` adds the combinable tags and 4-bit quant filter; prompts for anything omitted).
 * `./mlx.sh start`: Interactive launcher with Fast Swap and Concurrent port options.
 * `./mlx.sh stop`: Emergency kill-switch for running servers.
 
@@ -105,6 +105,21 @@ The search bar has a new **RAM Budget** selector:
 Badges are computed against the current budget: 🟢 **Fits Smoothly** (≤ 80%), 🟡 **Tight Fit** (≤ 100%), 🔴 **Too Large** (shows required vs. usable RAM). Sort by **Smallest / Largest RAM First** to find the right size instantly.
 
 Sizes are fetched in a fast second pass (`/api/repo_sizes`) and cached, so repeat searches are instant.
+
+### Combinable filters + any quantization
+
+The chips are **toggles, not presets** — click as many as you like and they combine with AND:
+
+| You want | Click |
+|---|---|
+| MLX models only | ⚡ MLX Models |
+| Vision models that run in MLX | ⚡ MLX Models + 👁️ Vision & Multimodal |
+| 8-bit coding models for your Mac | ⚡ MLX Models + 💻 Code Models, **Quant: 8-bit**, RAM Budget: Fits My Mac |
+| Everything on Hugging Face | 🌐 All HF Repos (clears every chip) |
+
+The **Quant** dropdown next to RAM Budget accepts **2, 3, 4, 5, 6, 8 and 16-bit** (previously the only quant chip was hard-wired to "4-bit"). Matching uses the repo name first (`-4bit`, `q8`, `8-bit`) and then the repo's real `config.quantization_config.bits` once sizes arrive, so quantization-in-config repos are filtered correctly too. The header line tells you the active combination, e.g. `Filter: MLX + CODE + 4-bit`.
+
+CLI equivalent: `./mlx.sh search <query> [ram_gb] [tags] [quant]`, e.g. `./mlx.sh search coder 32 mlx,code 4`.
 
 ---
 
