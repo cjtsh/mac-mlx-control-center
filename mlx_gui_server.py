@@ -369,6 +369,13 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                     is_vis = mlx_helper.is_vision_model(model_path)
                 use_engine = "mlx-vlm" if is_vis else "mlx-lm"
 
+            # Clients address models by repo id. `mlx-vlm` reloads whenever the requested id
+            # differs from the loaded one, so launching by absolute path means every first
+            # repo-id request pays a full reload (~26 s for a 70 GB model).
+            launch_hub = mlx_helper.hub_for_model(model_name) or mlx_helper.hub_for_model(model_path)
+            launch_target = (model_name if (launch_hub and "/" in model_name
+                                            and not os.path.isabs(model_name)) else model_path)
+
             extra_args = []
             if use_engine == "mlx-vlm":
                 if thinking:
@@ -377,7 +384,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                     extra_args.extend(["--draft-model", draft_model])
                 cmd = [
                     "uvx", "--from", "mlx-vlm", "--with", "jinja2", "python", "-m", "mlx_vlm.server",
-                    "--model", model_path,
+                    "--model", launch_target,
                     "--host", str(host),
                     "--port", str(port),
                     "--max-tokens", str(max_tokens),
@@ -390,7 +397,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                     extra_args.extend(["--draft-model", draft_model, "--num-draft-tokens", "3"])
                 cmd = [
                     "uvx", "--from", "mlx-lm", "mlx_lm.server",
-                    "--model", model_path,
+                    "--model", launch_target,
                     "--host", str(host),
                     "--port", str(port),
                     "--temp", str(temp),
@@ -404,9 +411,8 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             # Requests reach the server by repo id ("sh0wie/...-4bit"), not by the absolute
             # snapshot path we launch with. Without this the hub re-downloads the repo into
             # ~/.cache instead of reusing the copy on the selected drive.
-            hub_for_model = mlx_helper.hub_for_model(model_name) or mlx_helper.hub_for_model(model_path)
-            if hub_for_model:
-                env["HF_HUB_CACHE"] = hub_for_model
+            if launch_hub:
+                env["HF_HUB_CACHE"] = launch_hub
 
             with open(log_file, "a") as lf:
                 proc = subprocess.Popen(cmd, stdout=lf, stderr=lf, env=env)
@@ -767,7 +773,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.8.5 (Fast Downloads)</title>
+  <title>macOS MLX Control Center v0.8.6 (Fast Downloads)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1208,7 +1214,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.8.5 (Fast Downloads)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.8.6 (Fast Downloads)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>

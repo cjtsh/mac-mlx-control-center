@@ -1,5 +1,5 @@
 
-# ⚡ macOS MLX Control Center `v0.8.5` (Fast Parallel Downloads Edition)
+# ⚡ macOS MLX Control Center `v0.8.6` (Fast Parallel Downloads Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -146,9 +146,11 @@ Measured on the 73.5 GB REAP-288 model, started from the external drive:
 
 | Request | Before | After |
 |---|---|---|
-| First request by repo id | began a 146-file download into `~/.cache` | loads from `/Volumes/TBolt-1TB-Fun/...` in 52 s |
-| Warm request, same id | — | 1.0 s |
+| First request by repo id | began a 146-file download into `~/.cache` | **0.6 s**, no download |
+| Reloads caused by the id mismatch | one per first request (~26 s) | **0** |
 | Internal cache growth | 1.1 GB and climbing | 0 bytes |
+
+Servers are also **launched by repo id** now (not by absolute path), so the id the client sends already matches the loaded model. Launching by path meant `mlx-vlm` saw "a different model" and unloaded/reloaded 73 GB on the first request of every session.
 
 ## 🔄 Sync Installed Models into DeepSeek Harness (New in v0.8.4)
 
