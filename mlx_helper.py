@@ -60,6 +60,7 @@ MIN_DRIVE_GB = 8
 _DRIVE_CACHE = {"ts": 0.0, "drives": []}
 DRIVE_CACHE_TTL = 20
 _TM_CACHE = {"ts": 0.0, "mounts": set()}
+_TM_EXCLUDED = {}
 
 def load_storage_config():
     """Persisted storage preferences: default drive, known drives (by UUID), disabled drives."""
@@ -95,6 +96,86 @@ def _diskutil_field(mount, field):
         return ""
     m = re.search(r"^\s*" + re.escape(field) + r"\s*:\s*(.+)$", out, re.M)
     return m.group(1).strip() if m else ""
+
+def tm_exclusion_state(path):
+    """True when Time Machine skips `path`, False when it would back it up.
+
+    Model weights are multi-GB blobs that are trivially re-downloadable, so they never
+    belong in a backup set. Unknown/unqueryable paths report True so we stay quiet.
+    """
+    if not path:
+        return True
+    try:
+        if path in _TM_EXCLUDED:
+            return _TM_EXCLUDED[path]
+    except Exception:
+        pass
+    # tmutil can only answer for existing paths; inherit the state of the closest
+    # existing ancestor (an excluded volume protects everything inside it).
+    probe = path
+    while probe and not os.path.exists(probe):
+        parent = os.path.dirname(probe.rstrip("/"))
+        if parent == probe:
+            break
+        probe = parent
+    try:
+        out = subprocess.run(["tmutil", "isexcluded", probe or path], capture_output=True,
+                             text=True, timeout=8)
+        state = "[Excluded]" in (out.stdout or "")
+    except Exception:
+        state = True
+    try:
+        _TM_EXCLUDED[path] = state
+    except Exception:
+        pass
+    return state
+
+def exclude_from_time_machine(path):
+    """Best effort: adds `path` to the Time Machine exclusion list. Returns True if excluded."""
+    if not path or not os.path.exists(path):
+        return False
+    try:
+        if tm_exclusion_state(path):
+            return True
+        subprocess.run(["tmutil", "addexclusion", path], capture_output=True,
+                       text=True, timeout=15)
+        try:
+            _TM_EXCLUDED.pop(path, None)
+        except Exception:
+            pass
+        return tm_exclusion_state(path)
+    except Exception:
+        return False
+
+def protect_model_storage():
+    """Keeps every place we may store weights out of Time Machine backups."""
+    internal_lib = os.path.expanduser(os.path.join("~", LIBRARY_DIRNAME))
+    try:
+        # Create the internal library up front so its exclusion is in place before
+        # any download could land there.
+        os.makedirs(internal_lib, exist_ok=True)
+    except Exception:
+        pass
+    targets = [internal_lib]
+    targets.append(os.path.expanduser("~/.cache/huggingface"))
+    drives = list_storage_drives()
+    default = get_default_drive(drives)
+    for d in drives:
+        lib = d.get("library") or ""
+        if not lib:
+            continue
+        if default and d.get("id") == default.get("id") and d.get("connected"):
+            try:
+                os.makedirs(lib, exist_ok=True)
+            except Exception:
+                pass
+        targets.append(os.path.dirname(lib))
+    done = []
+    for t in targets:
+        if t and os.path.isdir(t) and not tm_exclusion_state(t):
+            if exclude_from_time_machine(t):
+                done.append(t)
+    return done
 
 def _time_machine_mounts():
     """Mount points that are Time Machine destinations — offered but flagged, never the default."""
@@ -171,6 +252,7 @@ def _volume_record(mount, name, internal=False, probe_path=None, library=None):
         "library_exists": os.path.isdir(library),
         "models": model_count,
         "is_time_machine": is_tm,
+        "tm_excluded": tm_exclusion_state(library),
         "connected": True,
     }
 
@@ -327,6 +409,8 @@ def ensure_library_hub(drive_id=None):
             os.makedirs(hub, exist_ok=True)
         except Exception:
             pass
+        # Multi-GB weights are re-downloadable: keep them out of Time Machine.
+        exclude_from_time_machine(os.path.dirname(hub))
     return hub, drive
 
 def library_hub_paths():

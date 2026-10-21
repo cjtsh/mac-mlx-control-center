@@ -161,6 +161,8 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             self.send_json({"sizes": sizes})
         elif path == "/api/drives":
             force = query.get("force", ["0"])[0].lower() in ("1", "true", "yes")
+            if force:
+                mlx_helper.protect_model_storage()
             drives = mlx_helper.list_storage_drives(force=force)
             default = mlx_helper.get_default_drive(drives)
             self.send_json({
@@ -238,6 +240,21 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                 "status": "ok",
                 "default": (chosen or {}).get("id", ""),
                 "default_name": (chosen or {}).get("name", ""),
+                "drives": mlx_helper.list_storage_drives(force=True),
+            })
+
+        elif path == "/api/drives/exclude":
+            target = (payload.get("drive") or "").strip()
+            drive = mlx_helper.get_drive(target) if target else mlx_helper.get_default_drive()
+            if not drive:
+                self.send_json({"error": "Unknown drive", "code": "unknown_drive"}, 404)
+                return
+            library = drive.get("library") or ""
+            ok = mlx_helper.exclude_from_time_machine(os.path.dirname(library) or library)
+            self.send_json({
+                "status": "ok" if ok else "failed",
+                "drive": drive.get("name", ""),
+                "tm_excluded": mlx_helper.tm_exclusion_state(os.path.dirname(library) or library),
                 "drives": mlx_helper.list_storage_drives(force=True),
             })
 
@@ -671,7 +688,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.7 (Multi-Drive)</title>
+  <title>macOS MLX Control Center v0.7.1 (Multi-Drive)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1112,7 +1129,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.7 (Multi-Drive)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.7.1 (Multi-Drive)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
@@ -1783,13 +1800,38 @@ INDEX_HTML = """<!DOCTYPE html>
       await loadDrives();
     }
 
+    async function excludeDriveBackups(driveId) {
+      try {
+        const res = await fetch('/api/drives/exclude', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ drive: driveId })
+        });
+        const data = await res.json();
+        if (data && data.drives) drivesCache = data.drives;
+        renderStorageSummary();
+        renderDriveModalList();
+        showToast(data && data.tm_excluded
+          ? '🚫 Time Machine now skips model weights on that drive'
+          : 'Could not change the Time Machine exclusion');
+      } catch (e) {
+        showToast('Could not change the Time Machine exclusion');
+      }
+    }
+
     function renderStorageSummary() {
       const el = document.getElementById('storageSummary');
       if (!el) return;
       const connected = drivesCache.filter(d => d.connected);
       const totalModels = connected.reduce((n, d) => n + (d.models || 0), 0);
       const off = drivesCache.filter(d => !d.connected && d.models);
-      let text = connected.map(d => `${d.internal ? '💻' : '💾'} ${d.name}: ${d.models || 0} model${(d.models || 0) === 1 ? '' : 's'} · ${d.free_gb} GB free`).join('   ');
+      let text = connected.map(d => {
+        const bits = `${d.models || 0} model${(d.models || 0) === 1 ? '' : 's'} · ${d.free_gb} GB free`;
+        const tm = d.tm_excluded
+          ? `<span title="Time Machine skips model weights on this drive">🚫</span>`
+          : `<span style="color:#fbbf24; cursor:pointer;" title="This library is inside your Time Machine backup set — click to exclude it" onclick="excludeDriveBackups('${d.id}')">⚠️ backup on</span>`;
+        return `${d.internal ? '💻' : '💾'} ${d.name}: ${bits} ${tm}`;
+      }).join('   ');
       if (off.length) text += `   ⏏ ${off.map(d => `${d.name} (${d.models})`).join(', ')} not connected`;
       el.innerHTML = `<span style="font-size:12px; color: var(--text-muted);">${text || 'No drives detected'} · ${totalModels} model${totalModels === 1 ? '' : 's'} installed</span>`;
     }
@@ -1811,6 +1853,9 @@ INDEX_HTML = """<!DOCTYPE html>
               <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">
                 ${d.internal ? 'Internal — keep this free if you can' : d.mount} · ${sizeNote}
                 ${d.is_time_machine ? ' · ⚠️ Time Machine destination' : ''}
+                ${d.tm_excluded
+                  ? ' · <span style="color:#34d399; white-space:nowrap;" title="Time Machine skips this library">🚫 TM off</span>'
+                  : ` · <span style="color:#fbbf24; cursor:pointer; white-space:nowrap;" title="This library is inside your Time Machine backup set — click to exclude it" onclick="excludeDriveBackups('${d.id}')">⚠️ TM ON</span>`}
               </div>
             </div>
             <button class="btn btn-primary" onclick="chooseDrive('${d.id}')">Download here</button>
@@ -3109,6 +3154,11 @@ INDEX_HTML = """<!DOCTYPE html>
 """
 
 if __name__ == "__main__":
+    # Model weights are re-downloadable: keep every library out of Time Machine.
+    try:
+        mlx_helper.protect_model_storage()
+    except Exception:
+        pass
     server = ThreadedHTTPServer(("127.0.0.1", PORT), MLXGuiHandler)
     print(f"macOS MLX Control Center GUI Server running at http://127.0.0.1:{PORT}")
     try:

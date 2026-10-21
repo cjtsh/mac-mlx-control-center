@@ -1,5 +1,5 @@
 
-# ⚡ macOS MLX Control Center `v0.7` (Multi-Drive Model Libraries Edition)
+# ⚡ macOS MLX Control Center `v0.7.1` (Multi-Drive Model Libraries Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -82,7 +82,8 @@ Prefer working in the terminal? You can also use `mlx.sh` directly:
 ### Key CLI Commands:
 * `./mlx.sh list`: View all downloaded local models and RAM sizes.
 * `./mlx.sh search <query> [ram_gb] [tags] [quant]`: Search Hugging Face repositories directly from terminal (e.g. `./mlx.sh search qwen 32` shows only models that fit in 32 GB; `./mlx.sh search coder 32 mlx,code 4` adds the combinable tags and 4-bit quant filter; prompts for anything omitted).
-* `./mlx.sh drives`: List every model-library drive (free space, model count, default target).
+* `./mlx.sh drives`: List every model-library drive (free space, model count, Time Machine state, default target).
+* `./mlx.sh protect-models`: Exclude every model library and the HF cache from Time Machine backups.
 * `./mlx.sh use-drive [name]`: Change the default download drive (`./mlx.sh use-drive NVMe`).
 * `./mlx.sh download <repo> --to <drive>`: Download straight to a specific drive (`--to` is optional; you get a drive menu instead).
 * `./mlx.sh start`: Interactive launcher with Fast Swap and Concurrent port options.
@@ -121,6 +122,7 @@ A 70–100 GB model does not have to live on your boot SSD. **macOS MLX Control 
 * **Free-space guard.** Downloads are refused with `insufficient_space` (GUI toast / HTTP 409) or a CLI prompt when the target drive is too small — no half-written 100 GB downloads.
 * **Absolute-path launching.** A model on an external drive starts as `mlx_lm.server --model /Volumes/<drive>/MLX-Models/hub/models--…/snapshots/<rev>`, so the engine never depends on the working directory.
 * **Live inventory.** The Downloaded Models tab shows one line per drive (`💾 TBolt-1TB-Fun: 3 models · 612 GB free`) and every model card is labelled with the drive it lives on. Drives that are unplugged keep their models listed as offline instead of vanishing.
+* **Backups stay sane.** Model weights are re-downloadable multi-GB blobs, so they never belong in a backup set. Every library directory (`<drive>/MLX-Models`, `~/MLX-Models`) plus the leftover `~/.cache/huggingface` cache is added to Time Machine's exclusion list automatically (`tmutil addexclusion`) as soon as it exists — including libraries on drives you plug in later. The drive list shows `🚫 TM off`, or a clickable `⚠️ backup on` warning if a drive's library is still inside your backup set. CLI: `./mlx.sh protect-models`.
 
 ### Why not `HF_HOME`?
 `HF_HOME` is global: it moves *every* model to one place and breaks as soon as you unplug that drive. Per-download `--cache-dir` keeps each model on the drive you chose, and the dashboard keeps track of which is which.

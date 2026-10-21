@@ -251,6 +251,43 @@ def save_storage_config(cfg):
     except Exception:
         pass
 
+def tm_exclusion_state(path):
+    probe = path
+    while probe and not os.path.exists(probe):
+        parent = os.path.dirname(probe.rstrip("/"))
+        if parent == probe:
+            break
+        probe = parent
+    try:
+        out = subprocess.run(["tmutil", "isexcluded", probe or path], capture_output=True, text=True, timeout=8)
+        return "[Excluded]" in (out.stdout or "")
+    except Exception:
+        return False
+
+def exclude_from_time_machine(path):
+    if not path or not os.path.exists(path):
+        return False
+    if tm_exclusion_state(path):
+        return True
+    try:
+        subprocess.run(["tmutil", "addexclusion", path], capture_output=True, text=True, timeout=15)
+        return tm_exclusion_state(path)
+    except Exception:
+        return False
+
+def protect_model_storage():
+    done = []
+    for t in [os.path.expanduser("~/MLX-Models"), os.path.expanduser("~/.cache/huggingface")]:
+        if os.path.isdir(t) and not tm_exclusion_state(t) and exclude_from_time_machine(t):
+            done.append(t)
+    for d in list_storage_drives(force=True):
+        lib = d.get("library") or ""
+        parent = os.path.dirname(lib) if lib else ""
+        if parent and os.path.isdir(parent) and not tm_exclusion_state(parent):
+            if exclude_from_time_machine(parent):
+                done.append(parent)
+    return done
+
 def _vol_free_gb(path):
     try:
         st = os.statvfs(path)
@@ -297,6 +334,7 @@ def list_storage_drives(force=False, include_known=True):
             "library_exists": os.path.isdir(library),
             "models": len([d for d in os.listdir(library) if d.startswith("models--")]) if os.path.isdir(library) else 0,
             "is_time_machine": False,
+            "tm_excluded": tm_exclusion_state(library),
             "connected": True,
             "disabled": False,
         })
@@ -333,6 +371,7 @@ def ensure_library_hub(drive_id=None):
         return "", None
     hub = target["library"]
     os.makedirs(hub, exist_ok=True)
+    exclude_from_time_machine(os.path.dirname(hub))
     return hub, target
 
 if __name__ == "__main__":
@@ -553,7 +592,8 @@ for i, d in enumerate(usable, 1):
     mark = '*' if d['id'] == default_id else ' '
     kind = 'INT' if d['internal'] else 'EXT'
     count = d.get('models', 0)
-    print(f\"{mark} {i}. {d['name']:<24} {kind} {d['free_gb']:>7.1f} GB free  {count:>2} model(s)\")
+    tm = '🚫 TM off' if d.get('tm_excluded') else '⚠️  TM ON'
+    print(f\"{mark} {i}. {d['name']:<24} {kind} {d['free_gb']:>7.1f} GB free  {count:>2} model(s)  {tm}\")
     print(f\"      {d['library']}\")
 
 off = [d for d in drives if not d['connected'] and d.get('models')]
@@ -572,6 +612,27 @@ print('* = default.  Change it: ./mlx.sh use-drive <name>')
 
 cmd_drives() {
     list_drives_table
+}
+
+cmd_protect_models() {
+    python3 -c "
+import sys
+sys.path.insert(0, '$PID_DIR')
+sys.path.insert(0, '$SCRIPT_DIR')
+import mlx_helper as h
+
+done = h.protect_model_storage()
+if done:
+    print('🚫 Excluded from Time Machine:')
+    for p in done:
+        print(f'   {p}')
+else:
+    print('✓ Every model library is already excluded from Time Machine.')
+print()
+for d in h.list_storage_drives(force=True):
+    state = 'excluded' if d.get('tm_excluded') else 'BACKED UP'
+    print(f\"   {d['name']:<24} {d['library']} — {state}\")
+"
 }
 
 cmd_use_drive() {
@@ -1332,7 +1393,7 @@ main_menu() {
     while true; do
         clear 2>/dev/null || true
         echo "╔════════════════════════════════════════════════════════════╗"
-        echo "║        MLX Model Control Center v0.7 (Multi-Drive)         ║"
+        echo "║       MLX Model Control Center v0.7.1 (Multi-Drive)        ║"
         echo "╚════════════════════════════════════════════════════════════╝"
         show_running_header
         echo "  1. List Downloaded Models (Select # to Launch)"
@@ -1387,6 +1448,7 @@ case "${1:-}" in
     search) search_hf "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
     download) shift; download_model "$@" ;;
     drives|storage) cmd_drives ;;
+    protect-models|tm-off) cmd_protect_models ;;
     use-drive|drive) cmd_use_drive "${2:-}" ;;
     delete) delete_model ;;
     status|running) view_health ;;
