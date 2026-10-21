@@ -1,5 +1,5 @@
 
-# ⚡ macOS MLX Control Center `v0.8.4` (Fast Parallel Downloads Edition)
+# ⚡ macOS MLX Control Center `v0.8.5` (Fast Parallel Downloads Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -38,6 +38,7 @@ curl -sSL https://raw.githubusercontent.com/cjtsh/mac-mlx-control-center/main/in
 
 Most local LLM runners are either overly complex, hog system menubars, or require manual hand-editing of configuration JSON files for coding tools. **macOS MLX Control Center** solves this with:
 
+* 📦 **Serves from your drive (v0.8.5)**: repo-id requests reuse the weights already on the external drive (`HF_HUB_CACHE` is pointed at the library) instead of silently re-downloading into `~/.cache`.
 * 🔄 **One-Click Harness Sync (v0.8.4)**: every installed model is written into your DeepSeek Harness `mlx-local` provider by a single button (or `./mlx.sh sync-harness`) — no hand-editing YAML, no retyping repo ids.
 * ⚡ **Fast, Resumable Downloads + Optional HF Login (v0.8.0)**: Large models now download over **8 parallel HTTPS range requests** instead of one throttled stream (measured on this line: 74 KB/s single connection → **2.2 MB/s** with 8), with byte-accurate progress, real MB/s, ETA, a **90-second stall watchdog** that restarts dead transfers automatically, and a **"🤗 Sign in" button** that uses HF's device flow so each user authorises *their own* account — the token goes into the macOS Keychain, never into this repo.
 * 💾 **Multi-Drive Model Libraries (v0.7)**: Every writable APFS/HFS+ drive is discovered automatically and each one becomes a model library at `<drive>/MLX-Models/hub`. Pick a **Download to:** drive in the toolbar or per model with the **💾 Save to…** button, keep 70–100 GB models off your boot SSD (pick a drive, confirm, then it downloads), and see a live per-drive inventory (models, free space, offline drives) on the Downloaded Models tab. Includes a free-space guard, absolute-path launching, and the `./mlx.sh drives` / `./mlx.sh use-drive` / `./mlx.sh download <repo> --to <drive>` CLI. Add `--turbo` to force parallel mode, or `--no-turbo` to use the plain client.
@@ -134,6 +135,20 @@ This repository ships **no tokens and no client secrets**. Signing in uses HF's 
 ```
 
 The GUI has the same flow behind the **🤗 Sign in** button in the header, plus a "paste a token instead" fallback for users who already have a fine-grained token. Tokens live in the **macOS Keychain** (`service: mlx-control-center`) with a `0600` file fallback at `~/.mlx_pids/secrets.json` for machines without a keychain; nothing is ever written into the repo, and every code path works anonymously — a signed-out clone still downloads public models, just slower on gated or rate-limited repos.
+
+## 📦 Serving Models from a Drive (Fixed in v0.8.5)
+
+A model server is launched with an absolute path (`/Volumes/TBolt.../snapshots/<rev>`), but clients address it by **repo id** (`sh0wie/Qwen3.8-Flash-Next-REAP-288-MLX-4bit`). `mlx-vlm` resolves that id through `huggingface_hub`, which defaults to `~/.cache/huggingface/hub` — so on a Mac with models on an external drive, the first repo-id request quietly **re-downloaded all 146 files into the internal SSD**.
+
+v0.8.5 exports `HF_HUB_CACHE=<the library that holds the model>` for every server it starts (dashboard and CLI), so a repo-id request reuses the weights you already downloaded instead of re-fetching them.
+
+Measured on the 73.5 GB REAP-288 model, started from the external drive:
+
+| Request | Before | After |
+|---|---|---|
+| First request by repo id | began a 146-file download into `~/.cache` | loads from `/Volumes/TBolt-1TB-Fun/...` in 52 s |
+| Warm request, same id | — | 1.0 s |
+| Internal cache growth | 1.1 GB and climbing | 0 bytes |
 
 ## 🔄 Sync Installed Models into DeepSeek Harness (New in v0.8.4)
 

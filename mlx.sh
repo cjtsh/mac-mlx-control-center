@@ -1114,6 +1114,20 @@ except Exception:
     echo "  Log:    $log_file"
     echo "---------------------------------------------------------"
 
+    # Requests arrive by repo id, not by the absolute path above; point the hub at the
+    # library that already holds this model so nothing re-downloads into ~/.cache.
+    local hub_for_model
+    hub_for_model=$(python3 - "$SCRIPT_DIR" "$PID_DIR" "$model_name" "$model_path" <<'PYCODE' 2>/dev/null || true
+import sys
+for p in (sys.argv[2], sys.argv[1]):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+import mlx_helper as h
+print(h.hub_for_model(sys.argv[3]) or h.hub_for_model(sys.argv[4]) or "")
+PYCODE
+)
+    [ -n "$hub_for_model" ] && export HF_HUB_CACHE="$hub_for_model"
+
     if [ "$is_vis" = "yes" ]; then
         nohup uvx --from mlx-vlm --with jinja2 python -m mlx_vlm.server \
             --model "$model_path" \
@@ -1469,7 +1483,7 @@ main_menu() {
     while true; do
         clear 2>/dev/null || true
         echo "╔════════════════════════════════════════════════════════════╗"
-        echo "║      MLX Model Control Center v0.8.4 (Fast Downloads)      ║"
+        echo "║      MLX Model Control Center v0.8.5 (Fast Downloads)      ║"
         echo "╚════════════════════════════════════════════════════════════╝"
         show_running_header
         echo "  1. List Downloaded Models (Select # to Launch)"

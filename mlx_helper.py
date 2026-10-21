@@ -848,6 +848,37 @@ def sync_dsh_models(provider_id=DSH_PROVIDER_ID, patch_path=None, models=None, d
     result["removed"] = [i for i in result["before"] if i not in {e["id"] for e in entries}]
     return result
 
+def repo_cache_dirname(repo_id):
+    return "models--" + str(repo_id).replace("/", "--")
+
+def hub_for_model(model_name):
+    """Find the library hub that already holds this repo, so the server can serve it offline.
+
+    `mlx-vlm` resolves a request's `model` field through huggingface_hub, which defaults to
+    ~/.cache/huggingface/hub — on a Mac with models on an external drive that means a silent
+    re-download of tens of GB. Pointing HF_HUB_CACHE at the library avoids that.
+    """
+    name = (model_name or "").strip().rstrip("/")
+    if not name:
+        return ""
+    candidates = []
+    for hub in library_hub_paths():
+        for repo in (name, name.replace("_", "/")):
+            if "/" in repo:
+                d = os.path.join(hub, repo_cache_dirname(repo))
+                if os.path.isdir(d):
+                    candidates.append(hub)
+    # a path inside a library (…/models--org--repo/snapshots/<rev>) also identifies its hub
+    if not candidates and os.sep in name:
+        probe = name
+        for _ in range(4):
+            probe = os.path.dirname(probe)
+            base = os.path.basename(probe)
+            if base.startswith("models--"):
+                candidates.append(os.path.dirname(probe))
+                break
+    return candidates[0] if candidates else ""
+
 def get_download_cmd(repo_id, subfolder="", revision="", cache_dir=""):
     """Finds available Hugging Face download CLI tool (hf, huggingface-cli, or uvx fallback)."""
     import shutil

@@ -401,6 +401,12 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             log_file = os.path.join(LOG_DIR, f"{safe_name}_{port}.log")
 
             env = mlx_helper.get_mlx_env()
+            # Requests reach the server by repo id ("sh0wie/...-4bit"), not by the absolute
+            # snapshot path we launch with. Without this the hub re-downloads the repo into
+            # ~/.cache instead of reusing the copy on the selected drive.
+            hub_for_model = mlx_helper.hub_for_model(model_name) or mlx_helper.hub_for_model(model_path)
+            if hub_for_model:
+                env["HF_HUB_CACHE"] = hub_for_model
 
             with open(log_file, "a") as lf:
                 proc = subprocess.Popen(cmd, stdout=lf, stderr=lf, env=env)
@@ -761,7 +767,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.8.4 (Fast Downloads)</title>
+  <title>macOS MLX Control Center v0.8.5 (Fast Downloads)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1202,7 +1208,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.8.4 (Fast Downloads)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.8.5 (Fast Downloads)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
