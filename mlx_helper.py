@@ -1275,6 +1275,40 @@ def _relaunch_download(cmd, cache_dir=""):
     except Exception:
         return None
 
+RESUME_LOCK = os.path.expanduser("~/.mlx_pids/turbo/resume.lock")
+_RESUME_LOCK_STALE = 180  # seconds before another process may steal it
+
+def _claim_resume_lock():
+    """Best-effort cross-process lock so two dashboards never relaunch the same transfer."""
+    os.makedirs(os.path.dirname(RESUME_LOCK), exist_ok=True)
+    for _ in range(2):
+        try:
+            fd = os.open(RESUME_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            try:
+                age = time.time() - os.path.getmtime(RESUME_LOCK)
+            except OSError:
+                age = _RESUME_LOCK_STALE + 1
+            if age > _RESUME_LOCK_STALE:
+                try:
+                    os.unlink(RESUME_LOCK)
+                except OSError:
+                    pass
+                continue
+            return False
+        except OSError:
+            return True  # never block recovery on lock trouble
+        with os.fdopen(fd, "w") as f:
+            f.write(str(os.getpid()))
+        return True
+    return False
+
+def _release_resume_lock():
+    try:
+        os.unlink(RESUME_LOCK)
+    except OSError:
+        pass
+
 def _watchdog_tick():
     try:
         active = get_active_downloads()
@@ -1322,11 +1356,18 @@ def _watchdog_tick():
             cmd = (get_download_cmd(repo, subfolder=dl.get("subfolder") or "",
                                     revision=dl.get("revision") or "main",
                                     cache_dir=hub) if repo else [])
-        rec["attempts"] += 1
-        rec["resuming"] = True
-        _kill_download_tree(pid)
-        new_pid = _relaunch_download(cmd)
-        rec.update(ts=time.time(), stalled=False, resuming=bool(new_pid), pid=new_pid or 0)
+        if not _claim_resume_lock():
+            # Another dashboard process is already restarting this transfer.
+            rec["ts"] = time.time()
+            continue
+        try:
+            rec["attempts"] += 1
+            rec["resuming"] = True
+            _kill_download_tree(pid)
+            new_pid = _relaunch_download(cmd)
+            rec.update(ts=time.time(), stalled=False, resuming=bool(new_pid), pid=new_pid or 0)
+        finally:
+            _release_resume_lock()
     for did in list(_DL_WATCH.keys()):
         if did not in live_ids:
             _DL_WATCH.pop(did, None)
