@@ -38,6 +38,7 @@ curl -sSL https://raw.githubusercontent.com/mypbs/mac-mlx-control-center/main/in
 
 Most local LLM runners are either overly complex, hog system menubars, or require manual hand-editing of configuration JSON files for coding tools. **macOS MLX Control Center** solves this with:
 
+* 🧠 **Accurate RAM Estimates & RAM Budget Filter (v0.5)**: Search cards now show real weight sizes and parameter counts pulled from Hugging Face (`safetensors` blobs + `safetensors.total`) and estimate RAM as `weights × 1.06 + KV cache + 1.5 GB`. A new **RAM Budget** dropdown (Fits My Mac / 8–192 GB / Any Size) hides models that can't run on your Mac, with 🟢/🟡/🔴 fit badges and Smallest/Largest RAM sorting.
 * 👁️ **Vision & Multimodal Image Recognition (v0.4)**: Full native integration with `mlx-vlm`! Run Gemma 4, Qwen 2.5/3.8 VL, PaliGemma, Pixtral, LLaVA, SmolVLM, and more with full image analysis, OCR, visual question answering, and chart understanding.
 * 🖼️ **Interactive Vision Test Chat (v0.4)**: Upload and preview images directly in the GUI test bench to test OpenAI-compatible multimodal payloads.
 * ⚙️ **Dual-Engine Auto-Detection (`mlx-vlm` + `mlx-lm`) (v0.4)**: Automatically detects model architectures and chooses the optimal inference engine without manual flags.
