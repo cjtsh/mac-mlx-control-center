@@ -237,6 +237,13 @@ def list_storage_drives(force=False, include_known=True):
             if did in seen:
                 continue
             mount = info.get("mount", "") or ""
+            library = os.path.join(mount, LIBRARY_DIRNAME, "hub") if mount else ""
+            # Only keep offline rows that still have something to show: a model
+            # count persisted in the config is only trusted while the library
+            # directory actually exists (otherwise the drive was wiped).
+            offline_models = info.get("models", 0) if library and os.path.isdir(library) else 0
+            if not offline_models and not info.get("pinned"):
+                continue
             drives.append({
                 "id": did,
                 "name": info.get("name", "Unknown drive"),
@@ -245,9 +252,9 @@ def list_storage_drives(force=False, include_known=True):
                 "fs": "unknown",
                 "total_gb": info.get("total_gb", 0),
                 "free_gb": 0,
-                "library": os.path.join(mount, LIBRARY_DIRNAME, "hub") if mount else "",
-                "library_exists": True,
-                "models": info.get("models", 0),
+                "library": library,
+                "library_exists": bool(library and os.path.isdir(library)),
+                "models": offline_models,
                 "is_time_machine": bool(info.get("is_time_machine")),
                 "connected": False,
                 "disabled": did in disabled,
