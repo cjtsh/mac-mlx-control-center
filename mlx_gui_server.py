@@ -737,7 +737,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.8.1 (Fast Downloads)</title>
+  <title>macOS MLX Control Center v0.8.2 (Fast Downloads)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1178,7 +1178,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.8.1 (Fast Downloads)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.8.2 (Fast Downloads)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
@@ -1624,29 +1624,16 @@ INDEX_HTML = """<!DOCTYPE html>
       <div style="background: rgba(0,0,0,0.35); border: 1px solid var(--card-border); border-radius: 10px; padding: 14px; margin-bottom: 16px; font-size: 12px; color: #94a3b8; line-height: 1.5;">
         <strong style="color: #60a5fa; font-size: 13px;">💡 What is "Max Output Tokens"?</strong><br>
         This specifies the maximum number of <strong>NEW tokens (generated response + thinking tokens)</strong> the server will produce in a single request. It does <em>not</em> limit your input prompt size.<br><br>
-        <strong style="color: #34d399;">🧠 Recommended Token Settings for Apple Silicon:</strong>
+        <strong style="color: #34d399;">🧠 Recommended token settings — tuned for <span id="tokenGuideMac">this Mac</span>:</strong>
         <table style="width: 100%; margin-top: 6px; border-collapse: collapse; font-size: 11px; color: #cbd5e1;">
           <tr style="border-bottom: 1px solid rgba(255,255,255,0.1);">
             <th style="text-align: left; padding: 4px;">Model Size</th>
             <th style="text-align: left; padding: 4px;">Rec. Max Tokens</th>
             <th style="text-align: left; padding: 4px;">KV Cache RAM Impact</th>
           </tr>
-          <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
-            <td style="padding: 4px;"><strong>2B – 8B Models</strong></td>
-            <td style="padding: 4px; color: #34d399;">4096 – 8192</td>
-            <td style="padding: 4px;">Light (~0.5 GB RAM)</td>
-          </tr>
-          <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
-            <td style="padding: 4px;"><strong>14B – 35B Models</strong></td>
-            <td style="padding: 4px; color: #fbbf24;">4096</td>
-            <td style="padding: 4px;">Moderate (~1.5 – 3 GB)</td>
-          </tr>
-          <tr>
-            <td style="padding: 4px;"><strong>70B+ Models</strong></td>
-            <td style="padding: 4px; color: #f87171;">2048 – 4096</td>
-            <td style="padding: 4px;">High (~4 GB+ RAM)</td>
-          </tr>
+          <tbody id="tokenGuideBody"></tbody>
         </table>
+        <div id="tokenGuideNote" style="margin-top: 6px; font-size: 10px; color: #64748b; line-height: 1.45;"></div>
       </div>
 
       <div style="margin-bottom: 16px;">
@@ -2426,6 +2413,68 @@ INDEX_HTML = """<!DOCTYPE html>
       showToast('Signed out of Hugging Face');
     }
 
+    function renderTokenGuide() {
+      const total = Math.round(currentTotalRam || 0);
+      const macEl = document.getElementById('tokenGuideMac');
+      const body = document.getElementById('tokenGuideBody');
+      const note = document.getElementById('tokenGuideNote');
+      if (!body) return;
+
+      let rows, tierNote;
+      if (!total) {
+        rows = [
+          ['2B – 8B', '4096 – 8192', 'Light (~0.5 – 1 GB)', '#34d399'],
+          ['14B – 35B', '4096', 'Moderate (~1.5 – 3 GB)', '#fbbf24'],
+          ['70B+', '2048 – 8192', 'High (~4 – 10 GB)', '#f87171'],
+        ];
+        tierNote = 'Machine RAM unknown — using conservative defaults.';
+        if (macEl) macEl.innerText = 'your Mac';
+      } else if (total >= 96) {
+        rows = [
+          ['2B – 8B', '8192 – 16384', 'Light (~1 GB)', '#34d399'],
+          ['14B – 35B', '8192', 'Moderate (~3 GB)', '#34d399'],
+          ['70B+', '4096 – 8192', 'High (~6 – 10 GB)', '#fbbf24'],
+        ];
+        tierNote = `Plenty of headroom at ${total} GB — long agentic runs are fine, but budget ~1 GB of KV per 8k tokens on 70B+ models.`;
+        if (macEl) macEl.innerText = `your ${total} GB Mac`;
+      } else if (total >= 48) {
+        rows = [
+          ['2B – 8B', '8192', 'Light (~1 GB)', '#34d399'],
+          ['14B – 35B', '4096 – 8192', 'Moderate (~2 – 4 GB)', '#fbbf24'],
+          ['70B+', '2048 – 4096', 'High (~8 GB+)', '#f87171'],
+        ];
+        tierNote = `At ${total} GB a 70B model leaves little room — keep the context short and close other apps.`;
+        if (macEl) macEl.innerText = `your ${total} GB Mac`;
+      } else if (total >= 24) {
+        rows = [
+          ['2B – 8B', '4096 – 8192', 'Light (~0.5 – 1 GB)', '#34d399'],
+          ['14B – 35B', '2048 – 4096', 'Moderate (~2 – 3 GB)', '#fbbf24'],
+          ['70B+', 'will not fit', 'Exceeds unified memory', '#f87171'],
+        ];
+        tierNote = `At ${total} GB stick to 8B and below for long contexts; 14B+ only at short context.`;
+        if (macEl) macEl.innerText = `your ${total} GB Mac`;
+      } else {
+        rows = [
+          ['2B – 8B', '4096', 'Light (~0.5 GB)', '#34d399'],
+          ['14B – 35B', '2048', 'Moderate (~1.5 – 2 GB)', '#fbbf24'],
+          ['70B+', 'will not fit', 'Exceeds unified memory', '#f87171'],
+        ];
+        tierNote = `At ${total} GB prefer 4-bit models at 8B or less, and keep context modest.`;
+        if (macEl) macEl.innerText = `your ${total} GB Mac`;
+      }
+
+      body.innerHTML = rows.map(([size, toks, kv, color], i) => `
+        <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);${i === rows.length - 1 ? 'border-bottom: none;' : ''}">
+          <td style="padding: 4px;"><strong>${size}</strong></td>
+          <td style="padding: 4px; color: ${color};">${toks}</td>
+          <td style="padding: 4px;">${kv}</td>
+        </tr>`).join('');
+
+      if (note) {
+        note.innerHTML = `${tierNote} KV cache scales with context length × layers × KV heads, assuming 4-bit weights and fp16 KV: roughly 1 GB per 8k tokens on an 8B model, 2–3 GB per 8k on 30B, 4–6 GB per 8k on 70B+.`;
+      }
+    }
+
     async function openConfigModal() {
       const res = await fetch('/api/config');
       globalConfig = await res.json();
@@ -2434,6 +2483,7 @@ INDEX_HTML = """<!DOCTYPE html>
       document.getElementById('cfgTempInput').value = globalConfig.default_temp || 0.0;
       document.getElementById('cfgMaxTokensInput').value = globalConfig.default_max_tokens || 4096;
       document.getElementById('cfgAutoSyncCheck').checked = globalConfig.auto_sync_agents !== false;
+      renderTokenGuide();
       document.getElementById('configModal').classList.add('active');
     }
 
