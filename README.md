@@ -1,5 +1,5 @@
 
-# ⚡ macOS MLX Control Center `v0.8.3` (Fast Parallel Downloads Edition)
+# ⚡ macOS MLX Control Center `v0.8.4` (Fast Parallel Downloads Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -38,6 +38,7 @@ curl -sSL https://raw.githubusercontent.com/cjtsh/mac-mlx-control-center/main/in
 
 Most local LLM runners are either overly complex, hog system menubars, or require manual hand-editing of configuration JSON files for coding tools. **macOS MLX Control Center** solves this with:
 
+* 🔄 **One-Click Harness Sync (v0.8.4)**: every installed model is written into your DeepSeek Harness `mlx-local` provider by a single button (or `./mlx.sh sync-harness`) — no hand-editing YAML, no retyping repo ids.
 * ⚡ **Fast, Resumable Downloads + Optional HF Login (v0.8.0)**: Large models now download over **8 parallel HTTPS range requests** instead of one throttled stream (measured on this line: 74 KB/s single connection → **2.2 MB/s** with 8), with byte-accurate progress, real MB/s, ETA, a **90-second stall watchdog** that restarts dead transfers automatically, and a **"🤗 Sign in" button** that uses HF's device flow so each user authorises *their own* account — the token goes into the macOS Keychain, never into this repo.
 * 💾 **Multi-Drive Model Libraries (v0.7)**: Every writable APFS/HFS+ drive is discovered automatically and each one becomes a model library at `<drive>/MLX-Models/hub`. Pick a **Download to:** drive in the toolbar or per model with the **💾 Save to…** button, keep 70–100 GB models off your boot SSD (pick a drive, confirm, then it downloads), and see a live per-drive inventory (models, free space, offline drives) on the Downloaded Models tab. Includes a free-space guard, absolute-path launching, and the `./mlx.sh drives` / `./mlx.sh use-drive` / `./mlx.sh download <repo> --to <drive>` CLI. Add `--turbo` to force parallel mode, or `--no-turbo` to use the plain client.
 * 🎛️ **Combinable Search Filters + Any-Bit Quant (v0.6)**: The `⚡ MLX Models`, `👁️ Vision & Multimodal` and `💻 Code Models` chips are independent toggles that combine with AND, and a new **Quant** dropdown filters by **2, 3, 4, 5, 6, 8 or 16-bit** (instead of 4-bit only). Stack them with the RAM budget: *"MLX + Code + 8-bit + Fits My Mac"* in three clicks.
@@ -133,6 +134,34 @@ This repository ships **no tokens and no client secrets**. Signing in uses HF's 
 ```
 
 The GUI has the same flow behind the **🤗 Sign in** button in the header, plus a "paste a token instead" fallback for users who already have a fine-grained token. Tokens live in the **macOS Keychain** (`service: mlx-control-center`) with a `0600` file fallback at `~/.mlx_pids/secrets.json` for machines without a keychain; nothing is ever written into the repo, and every code path works anonymously — a signed-out clone still downloads public models, just slower on gated or rate-limited repos.
+
+## 🔄 Sync Installed Models into DeepSeek Harness (New in v0.8.4)
+
+DeepSeek Harness reads its model list from a profile file (`~/.dsh/profiles/desktop/cordis.patch.yml`), one entry per model id. Nothing discovers your local server on its own, so a freshly downloaded model used to mean hand-editing YAML — and because the **desktop** profile only applies patches at startup, getting it wrong is invisible until a restart.
+
+**Settings → 🤗 DeepSeek Harness model list** now shows the state and fixes it in one click:
+
+| State | What it means |
+|---|---|
+| `3 models listed · 3 installed · in sync ✓` | Nothing to do |
+| `2 models listed · 3 installed · 1 downloaded but not listed` | Press **🔄 Sync now** |
+| `⚠️ listed but no longer installed` | Entry points at a model you deleted — sync removes it |
+
+What a sync does:
+
+* reads installed models from every library drive (deduplicated, so a model present on two drives appears once);
+* rewrites only the `models:` block of the `mlx-local` provider, keeping the rest of your file byte-identical;
+* **keeps hand-written labels** for models already listed, and generates readable ones for new repos (`sh0wie/Qwen3.8-...-REAP-288-MLX-4bit` → `Qwen3.8 Flash Next REAP 288 4-bit (MLX)`);
+* writes a timestamped backup next to the file (`cordis.patch.yml.bak-YYYYMMDD-HHMMSS`) before touching it;
+* never stores credentials — the provider has no `apiKeyEnv`, so nothing secret enters the profile.
+
+Same thing from the terminal:
+
+```bash
+./mlx.sh sync-harness
+```
+
+Restart DeepSeek Harness afterwards (the desktop profile loads the file at startup); then pick the model under the **MLX (this Mac)** provider. The model id **must be the Hugging Face repo id**, because `mlx-vlm` treats the request's `model` field as a repository to load — a cosmetic alias like `mlx-local` returns `404 Repository Not Found`.
 
 ## 💾 Multi-Drive Model Libraries (New in v0.7)
 

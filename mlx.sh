@@ -574,6 +574,29 @@ for i, r in enumerate(results, 1):
 # ── Storage Drives ───────────────────────────────────────────────────
 # Every writable APFS/HFS+ volume is a candidate library; nothing is
 # configured by hand.  Each drive keeps models in <drive>/MLX-Models/hub.
+cmd_sync_harness() {
+    python3 - "$SCRIPT_DIR" "$PID_DIR" <<'PYCODE'
+import sys
+for p in (sys.argv[2], sys.argv[1]):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+import mlx_helper as h
+res = h.sync_dsh_models()
+if not res.get("ok"):
+    print("x " + (res.get("error") or "sync failed"))
+    sys.exit(1)
+if not res.get("changed"):
+    print("OK DeepSeek Harness already lists all %d installed model(s)." % res["installed"])
+else:
+    for rid in res.get("added") or []:
+        print("  + " + rid)
+    for rid in res.get("removed") or []:
+        print("  - " + rid)
+    print("OK Synced %d model(s) into %s" % (res["installed"], res["patch"]))
+    print("   Restart DeepSeek Harness to load the new list (desktop profile reads it at startup).")
+PYCODE
+}
+
 list_drives_table() {
     python3 -c "
 import sys
@@ -1446,7 +1469,7 @@ main_menu() {
     while true; do
         clear 2>/dev/null || true
         echo "╔════════════════════════════════════════════════════════════╗"
-        echo "║      MLX Model Control Center v0.8.3 (Fast Downloads)      ║"
+        echo "║      MLX Model Control Center v0.8.4 (Fast Downloads)      ║"
         echo "╚════════════════════════════════════════════════════════════╝"
         show_running_header
         echo "  1. List Downloaded Models (Select # to Launch)"
@@ -1500,6 +1523,7 @@ case "${1:-}" in
     list) list_models false ;;
     search) search_hf "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
     download) shift; download_model "$@" ;;
+    sync-harness|harness) cmd_sync_harness ;;
     drives|storage) cmd_drives ;;
     protect-models|tm-off) cmd_protect_models ;;
     login|hf-login) cmd_login ;;

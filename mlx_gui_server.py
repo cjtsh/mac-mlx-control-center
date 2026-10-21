@@ -119,6 +119,23 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             self.send_html(INDEX_HTML)
         elif path == "/favicon.ico" or path == "/favicon.svg":
             self.send_svg(FAVICON_SVG)
+        elif path == "/api/harness":
+            listed = mlx_helper.read_dsh_models()
+            installed = []
+            for m in mlx_helper.find_local_models():
+                rid = m.get("repo_id") or m.get("name")
+                if rid and rid not in installed:
+                    installed.append(rid)  # same repo can sit on two drives
+            listed_ids = [e["id"] for e in listed.get("entries", [])]
+            self.send_json({
+                "patch": listed.get("patch"),
+                "provider": listed.get("provider"),
+                "listed": listed_ids,
+                "installed": installed,
+                "missing": [i for i in installed if i not in listed_ids],
+                "stale": [i for i in listed_ids if i not in installed],
+                "in_sync": set(listed_ids) == set(installed),
+            })
         elif path == "/api/hf/auth":
             self.send_json(mlx_helper.hf_auth_state())
         elif path == "/api/status":
@@ -238,6 +255,13 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             mlx_helper.save_global_settings(st)
             self.send_json({"status": "ok", "config": st})
 
+        elif path == "/api/harness/sync":
+            try:
+                res = mlx_helper.sync_dsh_models(provider_id=(payload.get("provider") or "").strip()
+                                                 or mlx_helper.DSH_PROVIDER_ID)
+                self.send_json(res)
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)}, 500)
         elif path == "/api/hf/device/start":
             try:
                 self.send_json(mlx_helper.hf_device_start())
@@ -737,7 +761,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.8.3 (Fast Downloads)</title>
+  <title>macOS MLX Control Center v0.8.4 (Fast Downloads)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1178,7 +1202,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.8.3 (Fast Downloads)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.8.4 (Fast Downloads)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
@@ -1640,6 +1664,14 @@ INDEX_HTML = """<!DOCTYPE html>
         <label style="font-size: 13px; color: #fff; cursor: pointer; display: flex; align-items: center; gap: 8px;">
           <input type="checkbox" id="cfgAutoSyncCheck" checked> Auto-sync Pi Code & OpenCode under provider 'MyMac'
         </label>
+      </div>
+
+      <div style="background: rgba(255,255,255,0.03); border: 1px solid #2a2f3d; border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; gap: 14px;">
+        <div style="min-width: 0;">
+          <div style="font-size: 13px; color: #fff; margin-bottom: 3px;">🤗 DeepSeek Harness model list</div>
+          <div id="harnessSyncNote" style="font-size: 11px; color: #94a3b8; line-height: 1.5;">Checking…</div>
+        </div>
+        <button id="harnessSyncBtn" class="btn btn-secondary" style="padding: 8px 12px; font-size: 12px; white-space: nowrap;" onclick="syncHarnessModels()">🔄 Sync now</button>
       </div>
 
       <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px;">
@@ -2475,6 +2507,48 @@ INDEX_HTML = """<!DOCTYPE html>
       }
     }
 
+    async function loadHarnessState() {
+      const note = document.getElementById('harnessSyncNote');
+      try {
+        const res = await fetch('/api/harness');
+        const d = await res.json();
+        const listed = (d.listed || []).length, installed = (d.installed || []).length;
+        let text = `${listed} model${listed === 1 ? '' : 's'} listed · ${installed} installed`;
+        if ((d.missing || []).length) text += ` · ${d.missing.length} downloaded but not listed`;
+        if ((d.stale || []).length) text += ` · ${d.stale.length} listed but no longer installed`;
+        if (d.in_sync) text += ' · in sync ✓';
+        note.innerText = text;
+        note.style.color = d.in_sync ? '#34d399' : '#fbbf24';
+        const btn = document.getElementById('harnessSyncBtn');
+        if (btn) btn.innerText = d.in_sync ? '✓ Synced' : '🔄 Sync now';
+      } catch (e) {
+        note.innerText = 'Could not read the DeepSeek Harness profile.';
+        note.style.color = '#f87171';
+      }
+    }
+
+    async function syncHarnessModels() {
+      const btn = document.getElementById('harnessSyncBtn');
+      const note = document.getElementById('harnessSyncNote');
+      if (btn) { btn.disabled = true; btn.innerText = '⏳ Syncing…'; }
+      try {
+        const res = await fetch('/api/harness/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const d = await res.json();
+        if (d.ok && !d.changed) {
+          showToast('✓ Harness model list is already up to date');
+        } else if (d.ok) {
+          const added = (d.added || []).length, removed = (d.removed || []).length;
+          showToast(`✓ Synced ${d.installed} model${d.installed === 1 ? '' : 's'} into DeepSeek Harness${added ? ` (+${added})` : ''}${removed ? ` (-${removed})` : ''} — restart Harness to see them`);
+        } else {
+          showToast('⚠️ ' + (d.error || 'sync failed'));
+        }
+      } catch (e) {
+        showToast('⚠️ Could not write the Harness profile');
+      }
+      if (btn) btn.disabled = false;
+      loadHarnessState();
+    }
+
     async function openConfigModal() {
       const res = await fetch('/api/config');
       globalConfig = await res.json();
@@ -2484,6 +2558,7 @@ INDEX_HTML = """<!DOCTYPE html>
       document.getElementById('cfgMaxTokensInput').value = globalConfig.default_max_tokens || 4096;
       document.getElementById('cfgAutoSyncCheck').checked = globalConfig.auto_sync_agents !== false;
       renderTokenGuide();
+      loadHarnessState();
       document.getElementById('configModal').classList.add('active');
     }
 

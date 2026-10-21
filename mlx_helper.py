@@ -696,6 +696,158 @@ def drive_for_path(path):
                 best = d
     return best
 
+DSH_PATCH_CANDIDATES = [
+    os.path.expanduser("~/.dsh/profiles/desktop/cordis.patch.yml"),
+    os.path.expanduser("~/.dsh/profiles/web/cordis.patch.yml"),
+]
+DSH_PROVIDER_ID = "mlx-local"
+
+def dsh_patch_path():
+    """Where the DeepSeek Harness user patch file lives (override with DSH_PATCH_FILE)."""
+    override = os.environ.get("DSH_PATCH_FILE")
+    if override:
+        return os.path.expanduser(override)
+    for cand in DSH_PATCH_CANDIDATES:
+        if os.path.exists(cand):
+            return cand
+    return DSH_PATCH_CANDIDATES[0]
+
+def dsh_model_label(repo_id):
+    """'mlx-community/gemma-4-E4B-it-MLX-4bit' -> 'gemma 4 E4B it (MLX)'."""
+    stem = repo_id.split("/")[-1]
+    quant = ""
+    m = re.search(r"-(\d+)bit$", stem, flags=re.I)
+    if m:
+        quant = " " + m.group(1) + "-bit"
+        stem = stem[:m.start()]
+    stem = re.sub(r"-MLX$", "", stem, flags=re.I)
+    pretty = stem.replace("-", " ").replace("_", " ").strip()
+    if pretty:
+        pretty = pretty[0].upper() + pretty[1:]
+    return "%s%s (MLX)" % (pretty, quant)
+
+def _yaml_quote(value):
+    """Quote only when YAML needs it, so hand diffs stay readable."""
+    text = str(value)
+    if re.match(r"^[A-Za-z0-9_./][A-Za-z0-9_./ ()+-]*$", text) and not text.endswith(" "):
+        return text
+    return '"' + text.replace('"', '\\"') + '"'
+
+def _format_dsh_models(entries):
+    lines = []
+    for e in entries:
+        lines.append("          - id: " + _yaml_quote(e["id"]))
+        lines.append("            name: " + _yaml_quote(e["name"]))
+    return lines
+
+def read_dsh_models(provider_id=DSH_PROVIDER_ID, patch_path=None):
+    """Parse the provider's existing model entries out of the DSH patch file."""
+    path = patch_path or dsh_patch_path()
+    entries, prov_idx, models_idx = [], None, None
+    try:
+        raw = open(path).read().splitlines()
+    except Exception:
+        return {"ok": False, "patch": path, "entries": [], "error": "patch file unreadable"}
+    prov_re = re.compile(r"^ {6}" + re.escape(provider_id) + r":\s*$")
+    for i, line in enumerate(raw):
+        if prov_re.match(line):
+            prov_idx = i
+            break
+    if prov_idx is None:
+        return {"ok": True, "patch": path, "entries": [], "provider": provider_id}
+    for j in range(prov_idx + 1, len(raw)):
+        if re.match(r"^ {6}\S", raw[j]):
+            break
+        if re.match(r"^ {8}models:\s*$", raw[j]):
+            models_idx = j
+            break
+    if models_idx is not None:
+        for line in raw[models_idx + 1:]:
+            if not line.strip():
+                continue
+            if not re.match(r"^ {10,}", line):
+                break
+            m = re.match(r"^ {10,}- id: (.+)$", line)
+            if m:
+                entries.append({"id": m.group(1).strip().strip('"').strip("'"), "name": ""})
+            else:
+                m = re.match(r"^ {12,}name: (.+)$", line)
+                if m and entries:
+                    entries[-1]["name"] = m.group(1).strip().strip('"').strip("'")
+    return {"ok": True, "patch": path, "provider": provider_id, "entries": entries}
+
+def sync_dsh_models(provider_id=DSH_PROVIDER_ID, patch_path=None, models=None, dry_run=False):
+    """Rewrite the provider's `models:` block with one entry per installed model.
+
+    The DSH desktop profile loads this file at startup, so a restart is needed to see
+    the result — which is exactly why regenerating it by hand is a chore worth automating.
+    """
+    path = patch_path or dsh_patch_path()
+    if not os.path.exists(path):
+        return {"ok": False, "error": "no DeepSeek Harness profile at " + path, "patch": path}
+    if models is None:
+        # name=None keeps any hand-written label already in the patch file
+        models = [{"id": m.get("repo_id") or m.get("name"), "name": None} for m in find_local_models()]
+    existing = {e["id"]: e.get("name") or "" for e in read_dsh_models(provider_id, path).get("entries", [])}
+    seen, entries = set(), []
+    for m in models:
+        rid = (m.get("id") or "").strip()
+        if not rid or rid in seen:
+            continue
+        seen.add(rid)
+        label = (m.get("name") or existing.get(rid) or dsh_model_label(rid)).strip()
+        entries.append({"id": rid, "name": label})
+    entries.sort(key=lambda e: e["id"].lower())
+    raw = open(path).read().splitlines()
+    prov_re = re.compile(r"^ {6}" + re.escape(provider_id) + r":\s*$")
+    prov_idx = next((i for i, l in enumerate(raw) if prov_re.match(l)), None)
+    if prov_idx is None:
+        return {"ok": False, "error": "provider '%s' is not in %s" % (provider_id, path), "patch": path}
+    models_idx, block_end = None, None
+    for j in range(prov_idx + 1, len(raw)):
+        if re.match(r"^ {6}\S", raw[j]):
+            block_end = j
+            break
+        if re.match(r"^ {8}models:\s*$", raw[j]) and models_idx is None:
+            models_idx = j
+    if block_end is None:
+        block_end = len(raw)
+    if models_idx is None:
+        new_lines = ["        models:"] + _format_dsh_models(entries)
+        out = raw[:prov_idx + 1] + new_lines + raw[prov_idx + 1:]
+    else:
+        end, trailing = models_idx + 1, []
+        for k in range(models_idx + 1, block_end):
+            if re.match(r"^ {10,}", raw[k]) and raw[k].strip():
+                end = k + 1
+            else:
+                break
+        for line in raw[models_idx + 1:end]:
+            if line.strip().startswith("#"):
+                trailing.append(line)
+        out = raw[:models_idx + 1] + _format_dsh_models(entries) + trailing + raw[end:]
+    before = read_dsh_models(provider_id, path).get("entries", [])
+    changed = out != raw
+    result = {
+        "ok": True, "patch": path, "provider": provider_id, "changed": changed,
+        "installed": len(entries), "before": [e["id"] for e in before],
+        "entries": entries, "needs_restart": changed,
+    }
+    if dry_run or not changed:
+        return result
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    try:
+        import shutil as _shutil
+        _shutil.copy2(path, path + ".bak-" + stamp)
+        with open(path, "w") as f:
+            f.write("\n".join(out) + "\n")
+    except Exception as e:
+        return {"ok": False, "error": str(e), "patch": path}
+    result["backup"] = path + ".bak-" + stamp
+    result["added"] = [e["id"] for e in entries if e["id"] not in result["before"]]
+    result["removed"] = [i for i in result["before"] if i not in {e["id"] for e in entries}]
+    return result
+
 def get_download_cmd(repo_id, subfolder="", revision="", cache_dir=""):
     """Finds available Hugging Face download CLI tool (hf, huggingface-cli, or uvx fallback)."""
     import shutil
