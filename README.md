@@ -22,7 +22,7 @@ Customize API for Local Coders like OpenCode or Pi Code
 ### Option A: 1-Line Terminal Instant Launcher (Recommended)
 Open Terminal and paste this single command:
 ```bash
-curl -sSL https://raw.githubusercontent.com/mypbs/mac-mlx-control-center/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/cjtsh/mac-mlx-control-center/main/install.sh | bash
 ```
 
 ---
@@ -178,7 +178,7 @@ You can use an AI coding assistant (like **Google Antigravity**, **ChatGPT / Cod
 Here are ready-to-use prompt templates you can copy and paste into your AI assistant:
 
 ### 📋 Prompt 1: 1-Click Setup & Launcher
-> *"I want to run local AI models on my Apple Silicon Mac using macOS MLX Control Center. Please run `curl -sSL https://raw.githubusercontent.com/mypbs/mac-mlx-control-center/main/install.sh | bash` to set up the repository, start the GUI dashboard on port 9998, and verify that the server is responding."*
+> *"I want to run local AI models on my Apple Silicon Mac using macOS MLX Control Center. Please run `curl -sSL https://raw.githubusercontent.com/cjtsh/mac-mlx-control-center/main/install.sh | bash` to set up the repository, start the GUI dashboard on port 9998, and verify that the server is responding."*
 
 ### 📋 Prompt 2: Auto-Configure LibreChat with MLX Vision
 > *"Please configure my local LibreChat setup to connect to my MLX Control Center. Update `librechat.yaml` with a custom endpoint named 'MacBook MLX' pointing to `http://host.docker.internal:9999/v1` with `fetch: true` and models list containing `default_model` and `mlx-community/gemma-4-e4b-it-OptiQ-4bit`. Then restart the LibreChat docker container and confirm health."*

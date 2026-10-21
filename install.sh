@@ -40,7 +40,7 @@ fi
 # 3. Clone or Update Repository
 if [ ! -d "$TARGET_DIR" ]; then
     echo "📦 Cloning macOS MLX Control Center to $TARGET_DIR..."
-    git clone https://github.com/mypbs/mac-mlx-control-center.git "$TARGET_DIR"
+    git clone https://github.com/cjtsh/mac-mlx-control-center.git "$TARGET_DIR"
 else
     echo "🔄 Updating repository in $TARGET_DIR..."
     cd "$TARGET_DIR" && git pull origin main 2>/dev/null || true
