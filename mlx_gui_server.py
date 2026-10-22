@@ -875,10 +875,15 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             else:
                 user_msg = {"role": "user", "content": prompt}
 
+            # A reasoning model spends its whole budget thinking and then returns
+            # no text at all: 512 tokens of thought looks exactly like a hidden or
+            # empty answer. Size the probe like a real turn instead.
+            budget = int(payload.get("max_tokens") or 0) or \
+                mlx_helper.output_token_budget(test_model_name)
             req_data = json.dumps({
                 "model": test_model_name,
                 "messages": [user_msg],
-                "max_tokens": int(payload.get("max_tokens") or 512),
+                "max_tokens": budget,
                 "stream": False,
             }).encode("utf-8")
 
@@ -906,14 +911,28 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                         full_output += f"🧠 THINKING PROCESS:\n{reasoning}\n\n"
                     elif reasoning:
                         full_output += f"🔒 (model thought for {len(reasoning)} characters — hidden, see Settings)\n\n"
+                    finish = choice.get("finish_reason")
                     if content:
                         full_output += f"💬 RESPONSE:\n{content}"
-                    elif not full_output:
+                        if finish == "length":
+                            full_output += (f"\n\n⚠️ Stopped at the {budget}-token limit — "
+                                            "the answer may be cut off. Raise Max tokens to see all of it.")
+                    elif reasoning:
+                        # Nothing but thought: show it, say why, so this never looks
+                        # like the output was deliberately hidden.
+                        full_output += (
+                            f"⚠️ The model returned no answer text — it used all "
+                            f"{completion_tokens} tokens thinking (finish: {finish or 'unknown'}).\n"
+                            "Showing the reasoning instead; raise Max tokens for a full answer.\n\n"
+                            f"🧠 THINKING PROCESS:\n{reasoning}"
+                        )
+                    else:
                         full_output = json.dumps(msg, indent=2)
 
                     stats = {"elapsed": round(elapsed, 2), "rate": round(rate, 2),
                              "prompt_tokens": prompt_tokens, "tokens": completion_tokens,
-                             "model": test_model_name, "finish_reason": choice.get("finish_reason")}
+                             "max_tokens": budget, "model": test_model_name,
+                             "finish_reason": finish}
                     self.send_json({"status": "ok", "response": full_output, "stats": stats,
                                     "target": {"base_url": url.rsplit("/chat/completions", 1)[0],
                                                "model": test_model_name}})
@@ -939,7 +958,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
 
 # One source of truth for the release: the title, the badge and the banner all
 # read this, so they can no longer drift apart (v0.11.6 shipped a stale badge).
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 
 INDEX_HTML = """<!DOCTYPE html>
 <html lang="en">

@@ -7,6 +7,7 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 import mlx_helper as h
+import mlx_gui_server as g
 
 failures = 0
 
@@ -89,6 +90,15 @@ def main():
         check("benchmark returns stats", isinstance(res, dict) and res.get("status") != "error", res)
     finally:
         h.urllib.request.urlopen = real
+
+    # A reply that is nothing but reasoning must be shown, not hidden.
+    import inspect as _inspect
+    src = _inspect.getsource(g.MLXGuiHandler)
+    check("the probe does not use a fixed 512-token budget",
+          'or 512' not in src, "512")
+    check("reasoning-only replies are explained, not hidden",
+          "it used all" in src, "it used all")
+    check("a truncated reply says so", "Stopped at the" in src, "Stopped at the")
 
     print(f"\n{'All test-panel checks passed.' if not failures else f'{failures} failure(s)'}")
     return 1 if failures else 0
