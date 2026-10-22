@@ -225,6 +225,64 @@ def test_zero_chunk_stream_gets_terminator():
     check("empty stream is counted", state()["empty_streams"] >= 1, state())
 
 
+# --------------------------------------------------------------------------- 9
+def test_max_completion_tokens_bridge():
+    """A local OpenAI client sends max_completion_tokens; mlx-vlm only reads max_tokens."""
+    raw = json.dumps(
+        {"model": "m", "messages": [{"role": "user", "content": "hi"}], "max_completion_tokens": 8192}
+    ).encode()
+    fixed = sg._rename_max_tokens(raw)
+    payload = json.loads(fixed)
+    check("bridges max_completion_tokens onto max_tokens", payload.get("max_tokens") == 8192, payload)
+    check("keeps the original field", payload.get("max_completion_tokens") == 8192, payload)
+
+    explicit = json.dumps({"max_tokens": 512, "max_completion_tokens": 8192}).encode()
+    check(
+        "an explicit max_tokens wins",
+        json.loads(sg._rename_max_tokens(explicit)).get("max_tokens") == 512,
+    )
+    check("non-json bodies pass through", sg._rename_max_tokens(b"not json") == b"not json")
+    check("missing field passes through", sg._rename_max_tokens(b'{"a":1}') == b'{"a":1}')
+    for bad in (True, "8192", 0, -5, 8.5, None):
+        blob = json.dumps({"max_completion_tokens": bad}).encode()
+        check("ignores max_completion_tokens=%r" % (bad,), sg._rename_max_tokens(blob) == blob)
+
+    # The ASGI wrapper must present the rewritten body (and length) to the app.
+    saved = sg._cfg().get("fix_max_tokens")
+    sg._cfg()["fix_max_tokens"] = True
+    try:
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [(b"content-length", str(len(raw)).encode())],
+        }
+        queue = [
+            {"type": "http.request", "body": raw[:10], "more_body": True},
+            {"type": "http.request", "body": raw[10:], "more_body": False},
+        ]
+
+        async def receive():
+            return queue.pop(0) if queue else {"type": "http.disconnect"}
+
+        before = state().get("max_tokens_fixed", 0)
+        message = asyncio.run(sg._rewriting_receive(scope, receive)())
+        check(
+            "multi-chunk body arrives bridged and re-framed",
+            message.get("body") == sg._rename_max_tokens(raw) and message.get("more_body") is False,
+            message,
+        )
+        headers = dict(scope["headers"])
+        check(
+            "content-length matches the new body",
+            headers.get(b"content-length") == str(len(message["body"])).encode(),
+            scope["headers"],
+        )
+        check("the bridge is counted", state().get("max_tokens_fixed", 0) == before + 1, state())
+    finally:
+        sg._cfg()["fix_max_tokens"] = saved
+
+
 if __name__ == "__main__":
     print("stream_guard unit checks")
     test_heartbeat_and_terminator()
@@ -235,5 +293,6 @@ if __name__ == "__main__":
     test_http_server_proxy()
     test_non_sse_untouched()
     test_zero_chunk_stream_gets_terminator()
+    test_max_completion_tokens_bridge()
     print("\n%d failure(s)" % len(FAILS))
     sys.exit(1 if FAILS else 0)

@@ -26,7 +26,7 @@ def load_global_settings():
         "default_port": 9999,
         "default_host": "127.0.0.1",
         "default_temp": 0.0,
-        "default_max_tokens": 4096,
+        "default_max_tokens": 0,  # 0 = derive from the loaded model's context window
         "auto_sync_agents": True,
         "turbo_downloads": True
     }
@@ -379,6 +379,7 @@ def stream_guard_status():
     info["streams"] = state.get("streams", 0)
     info["keepalives"] = state.get("keepalives", 0)
     info["synthetic_done"] = state.get("synthetic_done", 0)
+    info["max_tokens_fixed"] = state.get("max_tokens_fixed", 0)
     info["empty_streams"] = state.get("empty_streams", 0)
     info["errors"] = state.get("errors", 0)
     info["hooks"] = state.get("engine_hooks") or []
@@ -926,10 +927,10 @@ def sync_dsh_models(provider_id=DSH_PROVIDER_ID, patch_path=None, models=None, d
             extra.append("contextWindow: %d" % ctx)
         if "maxTokens" not in have:
             try:
-                out_tokens = int(load_global_settings().get("default_max_tokens", 4096) or 4096)
+                configured = int(load_global_settings().get("default_max_tokens", 0) or 0)
             except Exception:
-                out_tokens = 4096
-            extra.append("maxTokens: %d" % out_tokens)
+                configured = 0
+            extra.append("maxTokens: %d" % output_token_budget(rid, configured))
         entries.append({"id": rid, "name": label, "extra": extra})
     entries.sort(key=lambda e: e["id"].lower())
     raw = open(path).read().splitlines()
@@ -1140,6 +1141,38 @@ def model_context_profile(model_name_or_path):
     if not profile["recommended"]:
         profile["recommended"] = native or 0
     return profile
+
+OUTPUT_TOKEN_FLOOR = 4096
+OUTPUT_TOKEN_CEILING = 32768
+
+def output_token_budget(model_name_or_path=None, requested=None):
+    """Reply budget (tokens) that fits whichever model is loaded.
+
+    A single constant is wrong in both directions: too small truncates a long tool
+    call on a big model, too large asks a small-context model for more than it can
+    hold. So the fallback scales with the model's effective context window — a
+    quarter of it — floored at 4k tokens (enough for any agentic step) and capped
+    at 32k (more than a turn ever needs, and already minutes of decoding locally).
+    An explicit `requested` value from the dashboard or settings always wins, only
+    clamped to what the model can actually hold.
+    """
+    try:
+        want = int(requested or 0)
+    except (TypeError, ValueError):
+        want = 0
+    ctx = 0
+    if model_name_or_path:
+        try:
+            ctx = int(effective_context_window(model_name_or_path) or 0)
+        except Exception:
+            ctx = 0
+    if want > 0:
+        return min(want, ctx) if ctx and want > ctx else want
+    if ctx <= 0:
+        # Nothing known about the model: a middle-of-the-road budget beats a guess
+        # that is either tiny or minutes long.
+        return 8192
+    return max(OUTPUT_TOKEN_FLOOR, min(OUTPUT_TOKEN_CEILING, ctx // 4))
 
 def context_window_cap():
     """User cap from settings (0 = trust the model's own maximum)."""
@@ -1497,6 +1530,17 @@ def sync_pi_and_opencode(active_model, port=9999, is_vision=False):
                     md["providers"] = {}
                 
                 inputs = ["text", "image"] if is_vision else ["text"]
+                try:
+                    model_ctx = int(effective_context_window(active_model) or 0)
+                except Exception:
+                    model_ctx = 0
+                if not model_ctx:
+                    model_ctx = 131072
+                try:
+                    configured = int(load_global_settings().get("default_max_tokens", 0) or 0)
+                except Exception:
+                    configured = 0
+                model_budget = output_token_budget(active_model, configured)
                 md["providers"]["MyMac"] = {
                     "baseUrl": f"http://127.0.0.1:{port}/v1",
                     "api": "openai-completions",
@@ -1512,8 +1556,8 @@ def sync_pi_and_opencode(active_model, port=9999, is_vision=False):
                             "name": f"⚡ Active MLX Model ({'Vision' if is_vision else 'Text'} Auto-Detect)",
                             "reasoning": True,
                             "input": inputs,
-                            "contextWindow": 131072,
-                            "maxTokens": 8192,
+                            "contextWindow": model_ctx,
+                            "maxTokens": model_budget,
                             "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
                         },
                         {
@@ -1521,8 +1565,8 @@ def sync_pi_and_opencode(active_model, port=9999, is_vision=False):
                             "name": f"{active_model} (Local)",
                             "reasoning": True,
                             "input": inputs,
-                            "contextWindow": 131072,
-                            "maxTokens": 8192,
+                            "contextWindow": model_ctx,
+                            "maxTokens": model_budget,
                             "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
                         }
                     ]

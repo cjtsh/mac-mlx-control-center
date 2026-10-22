@@ -62,6 +62,7 @@ _STATE = {
     "synthetic_done": 0,
     "empty_streams": 0,
     "errors": 0,
+    "max_tokens_fixed": 0,
     "last": None,
 }
 
@@ -77,6 +78,7 @@ def _cfg():
     if not _CFG:
         _CFG["interval"] = _env_float("MLX_GUARD_KEEPALIVE_SECS", 5.0)
         _CFG["mode"] = (os.environ.get("MLX_GUARD_HEARTBEAT") or "auto").strip().lower()
+        _CFG["fix_max_tokens"] = _env_flag("MLX_GUARD_FIX_MAX_TOKENS", True)
         _CFG["log"] = os.path.expanduser(
             os.environ.get("MLX_GUARD_LOG") or "~/.mlx_logs/stream_guard.log"
         )
@@ -351,13 +353,116 @@ def _install_starlette():
             try:
                 if scope.get("type") == "http":
                     _PATH.set(scope.get("path") or "")
-            except Exception:
-                pass
+                    if (
+                        _cfg().get("fix_max_tokens")
+                        and (scope.get("method") or "").upper() == "POST"
+                    ):
+                        receive = _rewriting_receive(scope, receive)
+            except Exception as exc:  # noqa: BLE001 - never break the request
+                _note_error("starlette.call", exc)
             return await _orig(self, scope, receive, send)
 
         __call__._mlx_guarded = True
         cls.__call__ = __call__
     return True
+
+
+# ------------------------------------------------- request body (max_tokens)
+
+
+def _env_flag(name, default):
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _rename_max_tokens(raw):
+    """Copy max_completion_tokens onto max_tokens, which is all mlx-vlm reads.
+
+    The OpenAI clients used by Pi and DSH only send ``max_tokens`` to an
+    allowlist of hosted providers; against a local base URL they send
+    ``max_completion_tokens`` instead.  mlx-vlm's request normaliser looks for
+    ``max_tokens`` / ``max_output_tokens`` and otherwise falls back to the
+    --max-tokens launch flag, so the harness's own limit is silently replaced
+    by the control center's default.  Returning the original bytes on any doubt
+    keeps this a no-op when the request is already well formed.
+    """
+    if not raw or b"max_completion_tokens" not in raw:
+        return raw
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return raw
+    if not isinstance(payload, dict) or payload.get("max_tokens") is not None:
+        return raw
+    value = payload.get("max_completion_tokens")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return raw
+    payload["max_tokens"] = value
+    try:
+        return json.dumps(payload).encode("utf-8")
+    except Exception:
+        return raw
+
+
+def _fix_content_length(scope, body):
+    headers = scope.get("headers")
+    if not headers:
+        return
+    fixed = []
+    for key, value in headers:
+        if key.lower() == b"content-length":
+            fixed.append((key, str(len(body)).encode("ascii")))
+        else:
+            fixed.append((key, value))
+    scope["headers"] = fixed
+
+
+def _count_max_tokens_fix(value):
+    try:
+        with _STATE_LOCK:
+            _STATE["max_tokens_fixed"] = _STATE.get("max_tokens_fixed", 0) + 1
+            _STATE["last_max_tokens"] = value
+            _write_state()
+        _write_log("max_tokens bridged from max_completion_tokens=%s" % (value,))
+    except Exception:
+        pass
+
+
+def _rewriting_receive(scope, receive):
+    """Wrap ASGI receive so the JSON body can be adjusted before the app parses it."""
+    state = {"done": False}
+
+    async def wrapped():
+        if state["done"]:
+            return await receive()
+        state["done"] = True
+        message = await receive()
+        if not isinstance(message, dict) or message.get("type") != "http.request":
+            return message
+        chunks = [message.get("body") or b""]
+        while message.get("more_body"):
+            message = await receive()
+            if not isinstance(message, dict) or message.get("type") != "http.request":
+                break
+            chunks.append(message.get("body") or b"")
+        raw = b"".join(chunks)
+        try:
+            fixed = _rename_max_tokens(raw)
+        except Exception as exc:  # noqa: BLE001
+            _note_error("request.body", exc)
+            fixed = raw
+        if fixed is not raw and fixed != raw:
+            try:
+                _fix_content_length(scope, fixed)
+                payload = json.loads(fixed)
+                _count_max_tokens_fix(payload.get("max_tokens"))
+            except Exception:
+                pass
+        return {"type": "http.request", "body": fixed, "more_body": False}
+
+    return wrapped
 
 
 # --------------------------------------------------------- http.server (mlx-lm)

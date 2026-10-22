@@ -332,7 +332,13 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             port = payload.get("port")
             host = payload.get("host", default_h)
             temp = str(payload.get("temp", st.get("default_temp", 0.0)))
-            max_tokens = str(payload.get("max_tokens", st.get("default_max_tokens", 4096)))
+            try:
+                configured_tokens = int(payload.get("max_tokens") or st.get("default_max_tokens", 0) or 0)
+            except (TypeError, ValueError):
+                configured_tokens = 0
+            # 0 means "work it out from the model that is about to load", so a 288B
+            # model is not capped at a small model's budget (or the reverse).
+            max_tokens = str(mlx_helper.output_token_budget(model_name, configured_tokens))
             thinking = payload.get("thinking", True)
             draft_model = payload.get("draft", "")
             engine_pref = payload.get("engine", "auto")
@@ -798,7 +804,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.10.0 (MLX Controller)</title>
+  <title>macOS MLX Control Center v0.10.1 (MLX Controller)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1239,7 +1245,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.10.0 (MLX Controller)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.10.1 (MLX Controller)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
@@ -1935,7 +1941,7 @@ INDEX_HTML = """<!DOCTYPE html>
     let currentSearchQuery = '';
     let selectedForCompare = new Set();
     let mlxModelsCache = [];
-    let globalConfig = { default_context_window: 0, default_port: 9999, default_host: '127.0.0.1', default_temp: 0.0, default_max_tokens: 4096, thinking_budget: 0, show_thinking: false, auto_sync_agents: true };
+    let globalConfig = { default_context_window: 0, default_port: 9999, default_host: '127.0.0.1', default_temp: 0.0, default_max_tokens: 8192, thinking_budget: 0, show_thinking: false, auto_sync_agents: true };
     let currentViewMode = localStorage.getItem('mlx_view_mode') || 'grid';
 
     // ---- Model storage: drives are discovered from the mount table, never configured ----
@@ -2643,7 +2649,7 @@ INDEX_HTML = """<!DOCTYPE html>
       document.getElementById('cfgPortInput').value = globalConfig.default_port || 9999;
       document.getElementById('cfgHostSelect').value = globalConfig.default_host || '127.0.0.1';
       document.getElementById('cfgTempInput').value = globalConfig.default_temp || 0.0;
-      document.getElementById('cfgMaxTokensInput').value = globalConfig.default_max_tokens || 4096;
+      document.getElementById('cfgMaxTokensInput').value = globalConfig.default_max_tokens || 8192;
       const tbSel = document.getElementById('cfgThinkingBudget'); if (tbSel) tbSel.value = String(globalConfig.thinking_budget || 0);
       const stChk = document.getElementById('cfgShowThinking'); if (stChk) stChk.checked = !!globalConfig.show_thinking;
       const ctxSel = document.getElementById('cfgContextSelect');
@@ -2853,6 +2859,7 @@ INDEX_HTML = """<!DOCTYPE html>
           const bits = [];
           if (guardOn && guard.keepalives) bits.push(guard.keepalives + ' keepalive(s)');
           if (guardOn && guard.synthetic_done) bits.push(guard.synthetic_done + ' late [DONE]');
+          if (guardOn && guard.max_tokens_fixed) bits.push(guard.max_tokens_fixed + ' token-limit fix');
           if (guardOn && guard.errors) bits.push(guard.errors + ' error(s)');
           const detail = bits.length ? ' &middot; ' + bits.join(' &middot; ') : '';
           guardPill = `
@@ -3371,7 +3378,7 @@ INDEX_HTML = """<!DOCTYPE html>
       if (strategy === 'custom') {
         payload.port = parseInt(document.getElementById('customPort').value) || globalConfig.default_port || 9999;
         payload.temp = parseFloat(document.getElementById('customTemp').value) || globalConfig.default_temp || 0.0;
-        payload.max_tokens = parseInt(document.getElementById('customMaxTokens').value) || globalConfig.default_max_tokens || 4096;
+        payload.max_tokens = parseInt(document.getElementById('customMaxTokens').value) || globalConfig.default_max_tokens || 8192;
         payload.thinking = document.getElementById('customThinking').checked;
       }
 

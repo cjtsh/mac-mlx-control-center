@@ -1,5 +1,5 @@
 
-# ⚡ macOS MLX Control Center `v0.10.0` (MLX Controller Edition)
+# ⚡ macOS MLX Control Center `v0.10.1` (MLX Controller Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -198,7 +198,7 @@ The recommended window is `min(native, RAM-safe)` — normally just the native w
 * `./mlx.sh sync-harness` writes `contextWindow`, `maxTokens`, and image modality (`input: [text, image]` for vision models) into the DeepSeek Harness profile, so the harness compresses at the right point instead of assuming 200K and accepts image attachments
 * hand-edited capacity values in the harness profile are preserved across syncs
 
-## 🛡️ Stream Guard: No More “Silent” Turns (New in v0.10.0)
+## 🛡️ Stream Guard: No More “Silent” Turns (v0.10.0, per-model token budget in v0.10.1)
 
 **Symptom:** you chat with a local model through an agent harness (DeepSeek Harness, Pi Coder, any OpenAI-compatible client), the answer stops mid-turn or never starts, and typing “hello” gets it going again.
 
@@ -217,6 +217,30 @@ Kill switch and tuning:
 MLX_STREAM_GUARD=0 ./mlx.sh start <model>     # launch the old, unguarded way
 MLX_GUARD_KEEPALIVE_SECS=2 ./mlx.sh start ... # heartbeat interval (default 5)
 MLX_GUARD_HEARTBEAT=comment ./mlx.sh start ... # raw SSE comments instead of empty deltas
+```
+
+### Token budget: sized per model, not a constant
+
+Decode budgets used to be hardcoded (4,096 / 8,192 tokens), which is wrong in both directions: too
+small clips a long tool call on a big model, too large asks a small-context model for more than it
+can hold.
+
+* **Launches** pass `--max-tokens` = **a quarter of the loaded model's effective context window**,
+  floored at 4k and capped at 32k. `default_max_tokens: 0` in settings means *auto*; any positive
+  number pins it. The window itself comes from the model's own `config.json`, reduced to a
+  RAM-safe size when the KV cache would not fit.
+* **Agent sync** writes the same per-model numbers into Pi Coder (`contextWindow` + `maxTokens`)
+  and DeepSeek Harness, so the client and the server agree instead of advertising 131,072 / 8,192
+  regardless of the model.
+* **A request's own `max_completion_tokens` is honoured.** That field is what modern OpenAI clients
+  send to a local base URL — pi-ai, used by both Pi Coder and DeepSeek Harness, only emits
+  `max_tokens` for an allowlist of hosted providers — and `mlx-vlm` reads *only* `max_tokens`, so
+  every request used to silently fall back to the launch default. The guard now bridges the two
+  fields inside the request path, and leaves an explicit `max_tokens` untouched.
+
+```bash
+# 262,144-token model -> 32k replies;  32,768-token model -> 8k;  8,192-token model -> 4k
+python3 tests/test_token_budget.py
 ```
 
 Tests: `python3 tests/test_stream_guard.py` (no model download, no network).
