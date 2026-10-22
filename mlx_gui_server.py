@@ -980,7 +980,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
 
 # One source of truth for the release: the title, the badge and the banner all
 # read this, so they can no longer drift apart (v0.11.6 shipped a stale badge).
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 
 INDEX_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -4373,10 +4373,16 @@ INDEX_HTML = """<!DOCTYPE html>
 
 if __name__ == "__main__":
     # Model weights are re-downloadable: keep every library out of Time Machine.
-    try:
-        mlx_helper.protect_model_storage()
-    except Exception:
-        pass
+    # This shells out to `tmutil`, which can stall for minutes when Time Machine is
+    # busy or a synthetic /Volumes mount is slow — so it never runs on the path to
+    # binding the port. The dashboard must come up whether or not it can.
+    def _protect_storage():
+        try:
+            mlx_helper.protect_model_storage()
+        except Exception:
+            pass
+
+    threading.Thread(target=_protect_storage, name="mlx-tm-exclusion", daemon=True).start()
     # Watchdog: a stalled transfer must not sit at 0 B/s forever.
     try:
         mlx_helper.start_download_watchdog()

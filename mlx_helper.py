@@ -1502,6 +1502,11 @@ def list_storage_drives(force=False, include_known=True):
         for entry in entries:
             if entry.startswith("."):
                 continue
+            # Synthetic system mounts: `com.apple.TimeMachine.localsnapshots` and
+            # friends can block on stat while snapshots are thinned, which used to
+            # freeze startup before the dashboard ever bound its port.
+            if entry.startswith("com.apple."):
+                continue
             mount = os.path.join("/Volumes", entry)
             if not os.path.ismount(mount):
                 continue

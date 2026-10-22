@@ -1,5 +1,5 @@
 
-# ⚡ macOS LLM Control Center `v1.0.6` (MLX + Ollama Edition)
+# ⚡ macOS LLM Control Center `v1.0.7` (MLX + Ollama Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -524,6 +524,22 @@ The header pill reads **`🧭 DSH 4 model(s)`**. If the DSH app was launched bef
 last changed it turns amber and says **`restart to refresh`** — that is the one case where
 only quitting and reopening DeepSeek Harness can help, because the app holds its plugin
 composition in memory.
+
+### The dashboard must open even when a disk does not answer (v1.0.7)
+
+Startup used to run the Time Machine exclusion pass (`tmutil`) before the dashboard bound
+its port. On a Mac with a busy backup drive or a half-mounted snapshot that call can sit in
+the kernel for minutes, and the whole app looked dead — no window, no port, no error.
+Two changes make that impossible:
+
+* the exclusion pass now runs on a daemon thread (`mlx-tm-exclusion`) that the dashboard
+  never waits for;
+* drive discovery skips synthetic `/Volumes` mounts (`com.apple.*`, such as
+  `com.apple.TimeMachine.localsnapshots`), which can block on `stat` while snapshots are
+  thinned.
+
+Startup is back to milliseconds, and a slow disk can only delay a backup exclusion, never
+the UI.
 
 ---
 
