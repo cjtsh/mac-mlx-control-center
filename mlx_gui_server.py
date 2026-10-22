@@ -168,6 +168,15 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                     m["gguf_path"] = ggufs[0]["path"]
                     m["is_vision"] = False
                     m["arch_tag"] = "gguf"
+                    # Already inside Ollama's store? Then the card must not offer
+                    # a second import (Ollama keeps its own copy of every model).
+                    try:
+                        existing = mlx_helper.ollama_tag_for_gguf(m["gguf_path"])
+                    except Exception:
+                        existing = ""
+                    if existing:
+                        m["ollama_tag"] = existing
+                        m["in_ollama"] = True
             try:
                 ollama = mlx_helper.ollama_status()
             except Exception:
@@ -511,6 +520,15 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             self.send_json(mlx_helper.ollama_stop())
         elif path == "/api/ollama/sync":
             self.send_json(mlx_helper.sync_ollama_agents())
+        elif path == "/api/ollama/tag_for":
+            gguf = (query.get("path", [""])[0] or "").strip()
+            found = ""
+            if gguf and os.path.isfile(gguf):
+                try:
+                    found = mlx_helper.ollama_tag_for_gguf(gguf)
+                except Exception:
+                    found = ""
+            self.send_json({"tag": found, "ok": True})
         elif path == "/api/ollama/import":
             gguf = (payload.get("path") or "").strip()
             name = (payload.get("name") or "").strip() or None
@@ -866,7 +884,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.11.2 (MLX + Ollama)</title>
+  <title>macOS MLX Control Center v0.11.3 (MLX + Ollama)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1307,7 +1325,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.11.2 (MLX + Ollama)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.11.3 (MLX + Ollama)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
@@ -3131,9 +3149,11 @@ INDEX_HTML = """<!DOCTYPE html>
         // MLX models start a server; a GGUF has to be handed to Ollama first.
         const primaryAction = m.ollama
           ? `<button class="btn btn-secondary" onclick="openOllamaModal()">🦙 Managed by Ollama</button>`
-          : (m.engine === 'ollama' || /\\.gguf$/i.test(m.name)
-              ? `<button class="btn btn-primary" onclick='importGguf(${JSON.stringify(m.gguf_path || m.path || '')}, ${JSON.stringify(m.name)})'>🦙 Import to Ollama</button>`
-              : `<button class="btn ${isRunning ? 'btn-secondary' : 'btn-primary'}" onclick="openLaunchModal('${m.name}')">${isRunning ? `✓ Active on Port ${runningServer.port}` : '🚀 Start Model'}</button>`);
+          : (m.in_ollama
+              ? `<button class="btn btn-secondary" style="border-color: rgba(52,211,153,0.5); color: #34d399;" onclick="openOllamaModal()">✅ In Ollama as ${m.ollama_tag}</button>`
+              : (m.engine === 'ollama' || /\\.gguf$/i.test(m.name)
+                  ? `<button class="btn btn-primary" onclick='importGguf(${JSON.stringify(m.gguf_path || m.path || '')}, ${JSON.stringify(m.name)})'>🦙 Import to Ollama</button>`
+                  : `<button class="btn ${isRunning ? 'btn-secondary' : 'btn-primary'}" onclick="openLaunchModal('${m.name}')">${isRunning ? `✓ Active on Port ${runningServer.port}` : '🚀 Start Model'}</button>`));
 
         const fastSwapCard = `
           <div class="card">
@@ -3185,7 +3205,7 @@ INDEX_HTML = """<!DOCTYPE html>
             <div class="card-actions">
               ${primaryAction}
               <a href="${hfUrl}" target="_blank" class="btn btn-secondary" style="padding: 9px 12px; font-size: 12px;">🔗 HF Page</a>
-              <button class="btn btn-danger" onclick="deleteModel('${m.delete_target}')">🗑️ Delete</button>
+              <button class="btn btn-danger" onclick="deleteModel('${m.delete_target}')">${m.in_ollama ? '🗑️ Delete download (Ollama keeps its copy)' : '🗑️ Delete'}</button>
             </div>
           </div>`;
         modelsGrid.innerHTML += modelCard;
@@ -3308,9 +3328,24 @@ INDEX_HTML = """<!DOCTYPE html>
 
     async function importGguf(path, name) {
       if (!path) { alert('No local file path for this model.'); return; }
-      const base = (name || path.split('/').pop()).replace(/\\.gguf$/i, '');
+      const base = (name || path.split('/').pop()).replace(/\.gguf$/i, '');
       const suggested = base.toLowerCase().replace(/[^a-z0-9._:-]+/g, '-').replace(/^-+|-+$/g, '');
-      const tag = prompt('Name this model in Ollama (a tag like qwen2.5-coder:14b-q4):', suggested);
+      // Ask Ollama whether it already holds this exact file before offering a copy.
+      let existing = '';
+      try {
+        const check = await fetch('/api/ollama/tag_for?path=' + encodeURIComponent(path));
+        const cd = await check.json();
+        existing = cd.tag || '';
+      } catch (e) { /* offline check is best-effort */ }
+      if (existing) {
+        alert('This file is already in Ollama as "' + existing + '".\n\nNothing to do — use that model directly.');
+        openOllamaModal();
+        return;
+      }
+      const tag = prompt(
+        'Ollama keeps its own copy of every model, so importing copies this file into the store.\n' +
+        'The downloaded file can be deleted afterwards to get the space back.\n\n' +
+        'Name it in Ollama (a tag like qwen2.5-coder:14b-q4):', suggested);
       if (!tag) return;
       try {
         const res = await fetch('/api/ollama/import', {
@@ -3319,8 +3354,22 @@ INDEX_HTML = """<!DOCTYPE html>
         });
         const d = await res.json();
         if (!d.ok) { alert('Import failed: ' + (d.error || 'unknown error')); return; }
-        alert('Imported as ' + (d.name || tag) + '. It is now in the Ollama store and synced to your agents.');
+        const shown = d.tag || tag;
+        if (d.reused) {
+          alert('Already in Ollama as "' + shown + '". No second copy was made.');
+        } else {
+          const dir = path.substring(0, path.lastIndexOf('/'));
+          if (confirm('Imported "' + shown + '" into the Ollama store.\n\n' +
+                      'Delete the downloaded file now to reclaim the space?\n' +
+                      '(Ollama has its own copy, so the model keeps working.)')) {
+            await fetch('/api/delete', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ delete_target: dir })
+            });
+          }
+        }
         openOllamaModal();
+        loadModels();
       } catch (e) {
         alert('Import failed: ' + e);
       }

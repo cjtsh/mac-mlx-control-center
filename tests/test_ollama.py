@@ -113,6 +113,38 @@ def run():
         check("family lookup normalises dots", h.ollama_chat_template_for("qwen2.5") ==
               h.ollama_chat_template_for("qwen2"))
         check("unknown family gets no template", h.ollama_chat_template_for("llama") == "")
+
+        # ---- an already-imported GGUF must never get a second copy ----
+        check("tag normalisation ignores ':' vs '-'",
+              h._normalise_tag("qwen2.5:72b-instruct-q4_K_M") ==
+              h._normalise_tag("qwen2.5-72b-instruct-q4_k_m:latest"))
+        real_models = h.ollama_models
+        real_show = h._ollama_http
+        real_digest = h.gguf_digest
+        try:
+            h.ollama_models = lambda port=None: [{"id": "qwen2.5:72b-instruct-q4_K_M"}]
+            h._ollama_http = lambda *a, **k: {"details": {"parent_model": "/x/blobs/sha256-abc"}}
+            h.gguf_digest = lambda path: "abc"
+            check("existing tag found by name",
+                  h.ollama_tag_for_gguf("/models/Qwen2.5-72B-Instruct-Q4_K_M.gguf") ==
+                  "qwen2.5:72b-instruct-q4_K_M")
+            h.ollama_models = lambda port=None: [{"id": "something-else:latest"}]
+            h._ollama_http = lambda *a, **k: {"details": {"parent_model": "/x/blobs/sha256-abc"}}
+            check("existing tag found by digest",
+                  h.ollama_tag_for_gguf("/models/other-name.gguf") == "something-else:latest")
+            h.ollama_models = lambda port=None: []
+            check("no tag when store is empty", h.ollama_tag_for_gguf("/models/x.gguf") == "")
+            h.ollama_models = lambda port=None: [{"id": "qwen2.5:72b-instruct-q4_K_M"}]
+            h.gguf_digest = lambda path: "abc"
+            h._ollama_http = lambda *a, **k: {"details": {"parent_model": "/x/blobs/sha256-abc"}}
+            import tempfile as _tf
+            fh = _tf.NamedTemporaryFile(suffix=".gguf", delete=False); fh.write(b"x"); fh.close()
+            res = h.ollama_import(fh.name)
+            check("import reuses an existing tag", res.get("reused") is True and
+                  res.get("tag") == "qwen2.5:72b-instruct-q4_K_M", res)
+            os.unlink(fh.name)
+        finally:
+            h.ollama_models, h._ollama_http, h.gguf_digest = real_models, real_show, real_digest
         real_run = h.subprocess.run
 
         class _Run:

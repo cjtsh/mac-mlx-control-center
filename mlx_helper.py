@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, json, fnmatch, tempfile, hashlib, signal, shlex, subprocess, re, shutil, urllib.request, urllib.parse, urllib.error, socket, time, threading
+import os, sys, json, hashlib, fnmatch, tempfile, hashlib, signal, shlex, subprocess, re, shutil, urllib.request, urllib.parse, urllib.error, socket, time, threading
 
 _REPO_SIZE_CACHE = {}
 _SPEED_CACHE = {}
@@ -942,6 +942,12 @@ def ollama_import(gguf_path, name=None, port=None, wait_seconds=180):
         return {"ok": False, "error": f"no such file: {gguf_path}"}
     cfg = ollama_settings()
     tag = name or ollama_model_tag(gguf_path)
+    if not name:
+        existing = ollama_tag_for_gguf(gguf_path, port=port)
+        if existing:
+            return {"ok": True, "tag": existing, "reused": True,
+                    "message": f"Already in Ollama as {existing}",
+                    "output": ""}
     modelfile = f"FROM {gguf_path}\n"
     if cfg["context"] > 0:
         modelfile += f"PARAMETER num_ctx {cfg['context']}\n"
@@ -993,6 +999,82 @@ def ollama_import(gguf_path, name=None, port=None, wait_seconds=180):
     return {"ok": True, "tag": tag, "message": f"Imported as {tag}",
             "template_fixed": template_fixed,
             "output": (out.stdout or "").strip()[-400:]}
+
+GGUF_DIGEST_CACHE = os.path.join(os.path.expanduser("~/.mlx_pids"), "gguf_digests.json")
+
+def gguf_digest(path):
+    """sha256 of a GGUF file, cached by (path, size, mtime).
+
+    Ollama's blob names are exactly this digest, so it is how we tell whether a
+    downloaded file is already inside the model store.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = f"{path}|{st.st_size}|{int(st.st_mtime)}"
+    cache = {}
+    try:
+        with open(GGUF_DIGEST_CACHE) as fh:
+            cache = json.load(fh) or {}
+    except Exception:
+        cache = {}
+    if cache.get("key") == key and cache.get("sha256"):
+        return cache["sha256"]
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for block in iter(lambda: fh.read(8 << 20), b""):
+                digest.update(block)
+        value = digest.hexdigest()
+    except Exception:
+        return None
+    try:
+        with open(GGUF_DIGEST_CACHE, "w") as fh:
+            json.dump({"key": key, "sha256": value}, fh)
+    except Exception:
+        pass
+    return value
+
+def _normalise_tag(tag):
+    """Compare tags loosely: ':' 'latest' '-' '_' '.' are all just separators."""
+    text = str(tag or "").lower().replace(":latest", "").replace(":", "-")
+    return re.sub(r"[-_.]+", "-", text).strip("-")
+
+def ollama_tag_for_gguf(gguf_path, port=None):
+    """The Ollama tag that already holds this exact file, or "".
+
+    A name match is checked first (cheap); the content hash confirms it. A tag
+    created by hand may spell the same model with ':' where the control center
+    uses '-', which is how a duplicate tag becomes easy to create by accident.
+    """
+    try:
+        models = ollama_models(port=port)
+    except Exception:
+        return ""
+    if not models:
+        return ""
+    wanted = _normalise_tag(ollama_model_tag(gguf_path))
+    for m in models:
+        tag = m.get("id", "")
+        if tag and _normalise_tag(tag) == wanted:
+            return tag
+    # Different name, same bytes? Ollama names its blobs by the file's sha256.
+    digest = gguf_digest(gguf_path)
+    if not digest:
+        return ""
+    for m in models:
+        tag = m.get("id", "")
+        if not tag:
+            continue
+        try:
+            info = _ollama_http("/api/show", port=port, payload={"model": tag}, timeout=10) or {}
+        except Exception:
+            continue
+        parent = str((info.get("details") or {}).get("parent_model") or "")
+        if digest in parent:
+            return tag
+    return ""
 
 def local_gguf_files(model_dir):
     """The .gguf files inside one downloaded model snapshot (usually exactly one)."""
