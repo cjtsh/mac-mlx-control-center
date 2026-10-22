@@ -575,6 +575,19 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             keep = (payload.get("keep_alive") or "30m").strip()
             result = mlx_helper.ollama_run(tag, keep_alive=keep)
             self.send_json(result)
+        elif path == "/api/ollama/remove":
+            tag = (payload.get("model") or payload.get("tag") or "").strip()
+            if not tag:
+                self.send_json({"error": "No model tag provided"}, 400)
+                return
+            result = mlx_helper.ollama_remove(tag)
+            # A tag that no longer exists must leave every harness list too.
+            try:
+                threading.Thread(target=mlx_helper.sync_harnesses_quietly,
+                                 daemon=True).start()
+            except Exception:
+                pass
+            self.send_json(result)
         elif path == "/api/stop":
             pid = payload.get("pid")
             port = payload.get("port")
@@ -980,7 +993,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
 
 # One source of truth for the release: the title, the badge and the banner all
 # read this, so they can no longer drift apart (v0.11.6 shipped a stale badge).
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 
 INDEX_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -3446,6 +3459,7 @@ INDEX_HTML = """<!DOCTYPE html>
             <div class="card-actions">
               ${primaryAction}
               <a href="${hfUrl}" target="_blank" class="btn btn-secondary" style="padding: 9px 12px; font-size: 12px;">🔗 HF Page</a>
+              <button class="btn btn-danger" style="padding: 9px 12px; font-size: 12px;" onclick='deleteModel(${JSON.stringify(m.delete_target)}, ${JSON.stringify(m.name)}, ${JSON.stringify(m.size)})'>🗑️ Delete</button>
             </div>
           </div>`;
         fastSwapGrid.innerHTML += fastSwapCard;
@@ -3474,7 +3488,7 @@ INDEX_HTML = """<!DOCTYPE html>
             <div class="card-actions">
               ${primaryAction}
               <a href="${hfUrl}" target="_blank" class="btn btn-secondary" style="padding: 9px 12px; font-size: 12px;">🔗 HF Page</a>
-              <button class="btn btn-danger" onclick="deleteModel('${m.delete_target}')">${m.in_ollama ? '🗑️ Delete download (Ollama keeps its copy)' : '🗑️ Delete'}</button>
+              <button class="btn btn-danger" onclick='deleteModel(${JSON.stringify(m.delete_target)}, ${JSON.stringify(m.name)}, ${JSON.stringify(m.size)})'>${m.in_ollama ? '🗑️ Delete download (Ollama keeps its copy)' : '🗑️ Delete'}</button>
             </div>
           </div>`;
         modelsGrid.innerHTML += modelCard;
@@ -3516,6 +3530,9 @@ INDEX_HTML = """<!DOCTYPE html>
             <td style="padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.06);">${m.size_gb ? m.size_gb + ' GB' : '-'}</td>
             <td style="padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.06);">${m.family || '-'}</td>
             <td style="padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.06);">${m.parameter_size || '-'} ${m.quantization || ''}</td>
+            <td style="padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.06); text-align:right;">
+              <button class="btn btn-danger" style="padding:4px 10px; font-size:11px;" onclick='deleteOllamaModel(${JSON.stringify(m.id)})'>🗑️ Delete</button>
+            </td>
           </tr>`).join('');
         body.innerHTML = `
           <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px;">
@@ -3537,6 +3554,7 @@ INDEX_HTML = """<!DOCTYPE html>
             <thead><tr style="text-align:left; color:#9ca3af;">
               <th style="padding:6px 8px;">Model tag</th><th style="padding:6px 8px;">Size</th>
               <th style="padding:6px 8px;">Family</th><th style="padding:6px 8px;">Params / quant</th>
+              <th style="padding:6px 8px;"></th>
             </tr></thead>
             <tbody>${rows}</tbody>
           </table>` : '<p style="margin-top:12px;">No models in the store yet. Search Hugging Face with the 🦙 GGUF filter, download a .gguf file, then press “Import to Ollama”.</p>'}
@@ -4290,15 +4308,46 @@ INDEX_HTML = """<!DOCTYPE html>
       }
     }
 
-    async function deleteModel(deleteTarget) {
-      if (confirm(`Permanently delete model at ${deleteTarget}?`)) {
-        await fetch('/api/delete', {
+    async function deleteModel(deleteTarget, name, size) {
+      if (!deleteTarget) { alert('This entry has no file path to delete.'); return; }
+      const label = name ? `${name}${size ? ' (' + size + ')' : ''}` : deleteTarget;
+      const msg = `Delete ${label} from disk?\n\n${deleteTarget}\n\n` +
+                  'The files are removed permanently. Anything already imported into Ollama keeps its own copy. ' +
+                  'You can download it again from Hugging Face.';
+      if (!confirm(msg)) return;
+      try {
+        const res = await fetch('/api/delete', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ delete_target: deleteTarget })
         });
-        loadModels();
+        const d = await res.json();
+        if (d.error) alert('Delete failed: ' + d.error);
+      } catch (e) {
+        alert('Delete failed: ' + e);
       }
+      loadModels();
+      loadStatus();
+    }
+
+    async function deleteOllamaModel(tag) {
+      if (!tag) return;
+      if (!confirm(`Remove ${tag} from Ollama?\n\nThis deletes the copy in Ollama's own store and frees that space. ` +
+                   'A GGUF you downloaded separately stays where it is until you delete that too.')) return;
+      try {
+        const res = await fetch('/api/ollama/remove', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: tag })
+        });
+        const d = await res.json();
+        if (d.error) alert('Remove failed: ' + d.error);
+        else if (d.still_present) alert(`${tag} is still listed by Ollama. It may be loaded in memory — stop it and try again.`);
+      } catch (e) {
+        alert('Remove failed: ' + e);
+      }
+      await refreshOllamaModal();
+      loadModels();
+      loadStatus();
     }
 
     async function loadLogs() {

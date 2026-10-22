@@ -1543,7 +1543,7 @@ main_menu() {
     while true; do
         clear 2>/dev/null || true
         echo "╔════════════════════════════════════════════════════════════╗"
-        echo "║     LLM Control Center  v1.0.7 (MLX + Ollama)          ║"
+        echo "║     LLM Control Center  v1.0.8 (MLX + Ollama)          ║"
         echo "╚════════════════════════════════════════════════════════════╝"
         show_running_header
         echo "  1. List Downloaded Models (Select # to Launch)"

@@ -630,7 +630,7 @@ def ollama_version(timeout=4):
     except Exception:
         return None
 
-def _ollama_http(path, port=None, payload=None, timeout=3.0):
+def _ollama_http(path, port=None, payload=None, timeout=3.0, method=None):
     cfg = ollama_settings()
     port = int(port or cfg["port"])
     url = f"http://127.0.0.1:{port}{path}"
@@ -639,7 +639,7 @@ def _ollama_http(path, port=None, payload=None, timeout=3.0):
     if payload is not None:
         data = json.dumps(payload).encode()
         headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, headers=headers)
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode() or "{}")
 
@@ -712,6 +712,28 @@ def ollama_unload(tag=None, port=None, timeout=60):
         time.sleep(0.4)
         remaining = [m["id"] for m in ollama_ps(port=port)]
     return {"ok": True, "unloaded": done, "still_loaded": remaining}
+
+def ollama_remove(tag, port=None, timeout=180):
+    """Deletes a tag from the Ollama store, freeing its blobs on disk.
+
+    Ollama copies an imported GGUF into its own store, so deleting the download
+    does not reclaim that space — this is the other half of a real delete.
+    """
+    if not tag:
+        return {"ok": False, "error": "no model tag given"}
+    loaded = [m["id"] for m in ollama_ps(port=port)]
+    if tag in loaded:
+        ollama_unload(tag, port=port)
+    try:
+        _ollama_http("/api/delete", port=port, timeout=timeout,
+                     payload={"model": tag}, method="DELETE")
+    except Exception as e:
+        return {"ok": False, "tag": tag, "error": str(e)}
+    remaining = [m.get("id") for m in ollama_models(port=port)]
+    # Capability probes are cached per tag: a deleted tag must not answer later.
+    for key in [k for k in list(_OLLAMA_CAPS_CACHE) if k == tag or k.startswith(tag + ":")]:
+        _OLLAMA_CAPS_CACHE.pop(key, None)
+    return {"ok": True, "tag": tag, "still_present": tag in remaining}
 
 def ollama_run(tag, port=None, keep_alive="30m", timeout=900):
     """Load a model into the engine's memory (Ollama's equivalent of Start Model).

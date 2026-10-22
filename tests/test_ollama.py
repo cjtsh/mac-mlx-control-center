@@ -510,6 +510,22 @@ def run():
     check("deleting a model resyncs the harness lists",
           "sync_harnesses_quietly" in src, "delete resync")
 
+    # Deleting must exist for both stores, not just for downloaded folders.
+    with open(os.path.join(REPO, "mlx_helper.py"), encoding="utf-8") as fh:
+        hsrc = fh.read()
+    check("the Ollama store can be emptied from the dashboard",
+          '"/api/ollama/remove"' in src and "def ollama_remove(" in hsrc, "ollama remove")
+    check("removing a tag goes through DELETE /api/delete",
+          'method="DELETE"' in hsrc or "method=method" in hsrc, "_ollama_http method")
+    check("a removed tag drops its cached capabilities",
+          "_OLLAMA_CAPS_CACHE.pop" in hsrc, "caps cache invalidation")
+    check("every downloaded-model card carries a Delete button",
+          src.count("deleteModel(${JSON.stringify(m.delete_target)}") == 2, "two grids")
+    check("the delete confirm names the model and its size",
+          "Delete ${label} from disk?" in src, "confirm text")
+    check("the Ollama table has a Delete per tag",
+          "deleteOllamaModel(${JSON.stringify(m.id)})" in src, "row delete")
+
     passed = sum(1 for _, ok, _ in CHECKS if ok)
     print(f"\n{passed}/{len(CHECKS)} checks passed")
     return 0 if passed == len(CHECKS) else 1

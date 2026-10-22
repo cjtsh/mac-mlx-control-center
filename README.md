@@ -1,5 +1,5 @@
 
-# ⚡ macOS LLM Control Center `v1.0.7` (MLX + Ollama Edition)
+# ⚡ macOS LLM Control Center `v1.0.8` (MLX + Ollama Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -540,6 +540,20 @@ Two changes make that impossible:
 
 Startup is back to milliseconds, and a slow disk can only delay a backup exclusion, never
 the UI.
+
+### Deleting a model, from either store (v1.0.8)
+
+Downloading was always a button; deleting was a footnote. Every model card now carries
+**🗑️ Delete**, and the confirm states the model, its size and the exact path before
+anything is removed:
+
+* **a download** deletes its folder in the library (`/api/delete`), then rewrites the Pi,
+  OpenCode and DSH lists so no picker offers a model that is no longer on disk;
+* **an Ollama tag** is deleted with its own **🗑️ Delete** in the Ollama panel
+  (`DELETE /api/delete` against the daemon, then the same harness resync). Ollama keeps a
+  copy of every imported GGUF, so this is the half that actually reclaims that space;
+* the two are independent on purpose — deleting the download of an imported GGUF leaves
+  the Ollama copy alone, and the button says so.
 
 ---
 
