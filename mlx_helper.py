@@ -365,7 +365,17 @@ def stream_guard_status():
         age = max(0.0, time.time() - os.path.getmtime(STREAM_GUARD_STATE))
     except Exception:
         pass
-    info["active"] = bool(state.get("installed"))
+    pid = state.get("pid")
+    alive = False
+    if pid:
+        try:
+            os.kill(int(pid), 0)
+            alive = True
+        except Exception:
+            alive = False
+    info["pid"] = pid
+    info["active"] = bool(state.get("installed")) and alive
+    info["stale"] = bool(state.get("installed")) and not alive
     info["streams"] = state.get("streams", 0)
     info["keepalives"] = state.get("keepalives", 0)
     info["synthetic_done"] = state.get("synthetic_done", 0)

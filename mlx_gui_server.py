@@ -2851,9 +2851,9 @@ INDEX_HTML = """<!DOCTYPE html>
         if (guard.available) {
           const guardOn = !!guard.active;
           const bits = [];
-          if (guard.keepalives) bits.push(guard.keepalives + ' keepalive(s)');
-          if (guard.synthetic_done) bits.push(guard.synthetic_done + ' late [DONE]');
-          if (guard.errors) bits.push(guard.errors + ' error(s)');
+          if (guardOn && guard.keepalives) bits.push(guard.keepalives + ' keepalive(s)');
+          if (guardOn && guard.synthetic_done) bits.push(guard.synthetic_done + ' late [DONE]');
+          if (guardOn && guard.errors) bits.push(guard.errors + ' error(s)');
           const detail = bits.length ? ' &middot; ' + bits.join(' &middot; ') : '';
           guardPill = `
             <div class="status-pill ${guardOn ? 'ready' : 'none'}" title="Stream guard ${guardOn ? 'active in the last launched server' : 'armed for the next launch'}. Keepalives keep harness clients from timing out during a silent prefill or tool call.">
