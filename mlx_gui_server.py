@@ -910,7 +910,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
 
 # One source of truth for the release: the title, the badge and the banner all
 # read this, so they can no longer drift apart (v0.11.6 shipped a stale badge).
-APP_VERSION = "0.11.10"
+APP_VERSION = "0.11.11"
 
 INDEX_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -3198,7 +3198,11 @@ INDEX_HTML = """<!DOCTYPE html>
         if (ollama.running && omodels.length) {
           const group = document.createElement('optgroup');
           group.label = `🦙 Ollama engine (port ${ollama.port})`;
-          const base = (ollama.base_url || `http://127.0.0.1:${ollama.port}`) + '/v1';
+          // ollama_status reports base_url with /v1 already; adding it again is
+          // what made the test panel call /v1/v1/chat/completions and 404.
+          let base = (ollama.base_url || `http://127.0.0.1:${ollama.port}`).trim();
+          if (base.endsWith('/')) base = base.slice(0, -1);
+          if (!base.endsWith('/v1')) base += '/v1';
           omodels.forEach(m => {
             const opt = document.createElement('option');
             opt.value = `ollama:${m.id}`;

@@ -4160,8 +4160,12 @@ def openai_target(base_url="", host="127.0.0.1", port=9999, model=""):
     in one place is what makes the test panel engine-agnostic.
     """
     base = (base_url or "").strip().rstrip("/")
+    # Collapse a doubled suffix: several callers hand us a URL that already ends
+    # in /v1 (or /v1/v1 after an older config was saved). Exactly one /v1 is
+    # always correct, so fix it here rather than trusting every caller.
+    while base.endswith("/v1/v1"):
+        base = base[:-3]
     if base:
-        # Callers may pass "http://host:port/v1" or just "http://host:port".
         if not base.endswith("/v1"):
             base += "/v1"
         url = base + "/chat/completions"
