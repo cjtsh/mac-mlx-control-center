@@ -1,5 +1,5 @@
 
-# ⚡ macOS LLM Control Center `v1.0.5` (MLX + Ollama Edition)
+# ⚡ macOS LLM Control Center `v1.0.6` (MLX + Ollama Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -506,6 +506,24 @@ When auto-sync is enabled in **`⚙️ API Settings`**, launching any model auto
 
 Provider Name: **`MyMac`**  
 Model ID: **`default_model`** (Auto-Detect Active MLX Endpoint)
+
+### DeepSeek Harness reads its list once, at startup (v1.0.6)
+
+Pi Code and OpenCode read their config files every time they open a model picker, so a
+model you just downloaded is simply there. DeepSeek Harness composes its plugins and
+provider list when the app launches, then keeps that composition until it is reopened —
+which is why restarting it never helped when the list itself was stale.
+
+The Control Center now keeps that list current without you thinking about it:
+
+* a **finished download** is registered with Pi, OpenCode and DSH as soon as it lands;
+* **deleting** a model removes it from every harness list too;
+* starting a model still refreshes them, as before.
+
+The header pill reads **`🧭 DSH 4 model(s)`**. If the DSH app was launched before the list
+last changed it turns amber and says **`restart to refresh`** — that is the one case where
+only quitting and reopening DeepSeek Harness can help, because the app holds its plugin
+composition in memory.
 
 ---
 

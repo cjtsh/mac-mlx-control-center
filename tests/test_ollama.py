@@ -475,6 +475,41 @@ def run():
     check("starting a model also refreshes DSH's model list",
           "mlx_helper.sync_dsh_models()" in src, "sync_dsh_models call")
 
+    # DSH composes its provider list once, at startup, so the dashboard has to be
+    # able to tell "your list is current" from "your app is older than the list".
+    with _tf.TemporaryDirectory() as td:
+        patch = os.path.join(td, "cordis.patch.yml")
+        open(patch, "w").write(
+            "config:\n  providers:\n      mlx-local:\n"
+            "        displayName: MLX\n"
+            "        baseURL: http://127.0.0.1:9999/v1\n"
+            "        models:\n"
+            "          - id: org/A-7B\n"
+            "          - id: org/B-7B\n")
+        real_pids = h.dsh_app_pids
+        real_started = h._process_started_at
+        try:
+            state = h.dsh_sync_state(patch_path=patch)
+            check("DSH state lists the models it will load",
+                  state["models"] == ["org/A-7B", "org/B-7B"], state["models"])
+            check("DSH state is not stale while the app is closed", state["stale"] is False, state)
+
+            h.dsh_app_pids = lambda: [4242]
+            h._process_started_at = lambda pid: os.stat(patch).st_mtime + 60
+            check("DSH state is current when the app started after the edit",
+                  h.dsh_sync_state(patch_path=patch)["stale"] is False, "app newer")
+            h._process_started_at = lambda pid: os.stat(patch).st_mtime - 60
+            check("DSH state flags a restart when the list changed after launch",
+                  h.dsh_sync_state(patch_path=patch)["stale"] is True, "app older")
+        finally:
+            h.dsh_app_pids = real_pids
+            h._process_started_at = real_started
+
+    check("a finished download syncs the harnesses without being asked",
+          "_watch_then_sync" in src, "download watcher")
+    check("deleting a model resyncs the harness lists",
+          "sync_harnesses_quietly" in src, "delete resync")
+
     passed = sum(1 for _, ok, _ in CHECKS if ok)
     print(f"\n{passed}/{len(CHECKS)} checks passed")
     return 0 if passed == len(CHECKS) else 1

@@ -12,6 +12,7 @@ import urllib.parse
 import subprocess
 import re
 import socket
+import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
@@ -151,6 +152,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             live_port = servers[0].get("port") if servers else config.get("default_port")
             self.send_json({"servers": servers, "stats": stats, "downloads": downloads, "config": config,
                             "stream_guard": mlx_helper.stream_guard_status(),
+                            "dsh": mlx_helper.dsh_sync_state(),
                             "prefix_cache": mlx_helper.apc_status(live_port),
                             "ollama": mlx_helper.ollama_status(with_models=True)})
         elif path == "/api/gguf/files":
@@ -752,6 +754,13 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             delete_target = payload.get("delete_target")
             if delete_target and os.path.exists(delete_target):
                 subprocess.run(["rm", "-rf", delete_target])
+                # A removed model must leave every harness list as well, or the
+                # picker keeps offering something that is no longer on disk.
+                try:
+                    threading.Thread(target=mlx_helper.sync_harnesses_quietly,
+                                     daemon=True).start()
+                except Exception:
+                    pass
                 self.send_json({"status": "ok", "deleted": delete_target})
             else:
                 self.send_json({"error": "Target path not found"}, 400)
@@ -833,6 +842,13 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                     turbo_used = True
 
             proc = subprocess.Popen(cmd, env=env)
+            # When the download ends, register it in Pi and DSH before the user
+            # opens either one -- a finished download should need no follow-up.
+            try:
+                threading.Thread(target=mlx_helper._watch_then_sync, args=(proc,),
+                                 daemon=True).start()
+            except Exception:
+                pass
             self.send_json({
                 "status": "started",
                 "repo_id": repo_id,
@@ -964,7 +980,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
 
 # One source of truth for the release: the title, the badge and the banner all
 # read this, so they can no longer drift apart (v0.11.6 shipped a stale badge).
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 
 INDEX_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -3146,6 +3162,21 @@ INDEX_HTML = """<!DOCTYPE html>
             </div>`;
         }
 
+        // DeepSeek Harness composes its model list at startup, so a model added
+        // while it is open stays invisible until the app is reopened. Say which.
+        const dsh = data.dsh || {};
+        let dshPill = '';
+        if (dsh.patch) {
+          const dshStale = !!dsh.stale;
+          const dshTitle = dshStale
+            ? `DeepSeek Harness was launched before the model list last changed. Quit and reopen it to see all ${dsh.count} model(s). Patch: ${dsh.patch}`
+            : `DeepSeek Harness reads ${dsh.count} model(s) from ${dsh.patch} at startup${dsh.running ? '' : ' (the app is closed, so it will pick them up' + ' on next launch)'}. Pi and OpenCode read their lists live.`;
+          dshPill = `
+            <div class="status-pill ${dshStale ? 'none' : 'ready'}" title="${dshTitle}">
+              <span class="status-dot ${dshStale ? 'pulse' : ''}"></span> 🧭 DSH ${dsh.count} model(s)${dshStale ? ' &middot; restart to refresh' : ''}
+            </div>`;
+        }
+
         if (activeServers.length > 0) {
           const readyCount = activeServers.filter(s => s.status === 'READY').length;
           const olSuffix = olLoaded.length ? ` · ${olLoaded.length} Ollama model(s) loaded` : '';
@@ -3156,6 +3187,7 @@ INDEX_HTML = """<!DOCTYPE html>
           statusHeader.innerHTML += guardPill;
           statusHeader.innerHTML += pcPill;
           statusHeader.innerHTML += ollamaPill;
+          statusHeader.innerHTML += dshPill;
           
           serverContainer.innerHTML = '';
           activeServers.forEach(s => {
@@ -3198,6 +3230,7 @@ INDEX_HTML = """<!DOCTYPE html>
           statusHeader.innerHTML += guardPill;
           statusHeader.innerHTML += pcPill;
           statusHeader.innerHTML += ollamaPill;
+          statusHeader.innerHTML += dshPill;
           serverContainer.innerHTML = `<div class="card" style="grid-column: 1 / -1; width: 100%; text-align: center; color: var(--text-muted); padding: 18px;">No model currently running. Click "Start Model" on any downloaded model below!</div>`;
         }
 

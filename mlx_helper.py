@@ -1753,6 +1753,96 @@ def read_dsh_models(provider_id=DSH_PROVIDER_ID, patch_path=None):
                     entries[-1].setdefault("extra", []).append(line.strip())
     return {"ok": True, "patch": path, "provider": provider_id, "entries": entries}
 
+def dsh_app_pids():
+    """PIDs of the running DeepSeek Harness desktop app (empty when it is closed)."""
+    try:
+        out = subprocess.check_output(["pgrep", "-f", "DeepSeek Harness.app/Contents/MacOS"],
+                                      text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        return []
+    return sorted({int(p) for p in out.split() if p.strip().isdigit()})
+
+
+def _process_started_at(pid):
+    """Wall-clock start time of a process, from ps rather than a guess."""
+    try:
+        elapsed = subprocess.check_output(["ps", "-o", "etime=", "-p", str(pid)],
+                                          text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        return None
+    if not elapsed:
+        return None
+    days = 0
+    if "-" in elapsed:
+        head, elapsed = elapsed.split("-", 1)
+        days = int(head)
+    parts = [int(p) for p in elapsed.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    return time.time() - (days * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2])
+
+
+def dsh_sync_state(provider_id=DSH_PROVIDER_ID, patch_path=None):
+    """What DSH will load on its next launch, and whether the running app predates it.
+
+    DSH composes its plugins and provider list at startup, so a model added to the
+    patch file while the app is open stays invisible until the app is reopened.
+    `stale` says exactly that, so the dashboard can stop guessing.
+    """
+    rd = read_dsh_models(provider_id=provider_id, patch_path=patch_path)
+    path = rd.get("patch") or dsh_patch_path()
+    try:
+        patch_mtime = os.stat(path).st_mtime
+    except Exception:
+        patch_mtime = 0.0
+    ids = [e.get("id") for e in rd.get("entries") or [] if e.get("id")]
+    pids = dsh_app_pids()
+    started = _process_started_at(pids[0]) if pids else None
+    stale = bool(pids and started and patch_mtime and patch_mtime > started + 1)
+    return {
+        "ok": bool(rd.get("ok", True)),
+        "patch": path,
+        "provider": provider_id,
+        "models": ids,
+        "count": len(ids),
+        "running": bool(pids),
+        "started": started,
+        "patch_mtime": patch_mtime,
+        "stale": stale,
+        "error": rd.get("error", ""),
+    }
+
+
+def sync_harnesses_quietly(active_model=None, port=9999, is_vision=False):
+    """Refresh every harness config after the model library changes. Never raises."""
+    out = {}
+    if active_model:
+        try:
+            sync_pi_and_opencode(active_model, port=port, is_vision=is_vision)
+            out["pi"] = "ok"
+        except Exception as exc:
+            out["pi"] = "error: %s" % exc
+    try:
+        out["dsh"] = sync_dsh_models()
+    except Exception as exc:
+        out["dsh"] = {"ok": False, "error": str(exc)}
+    try:
+        out["ollama"] = sync_ollama_agents()
+    except Exception as exc:
+        out["ollama"] = {"ok": False, "error": str(exc)}
+    return out
+
+
+def _watch_then_sync(proc, delay=3.0):
+    """After a background download exits, pick the new models up in every harness."""
+    try:
+        proc.wait()
+    except Exception:
+        return
+    time.sleep(delay)  # let the last blobs land and the library listing settle
+    sync_harnesses_quietly()
+
+
 def _dsh_entry_is_vision(model):
     """Best-effort image capability for one sync entry.
 
