@@ -884,7 +884,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.11.3 (MLX + Ollama)</title>
+  <title>macOS MLX Control Center v0.11.4 (MLX + Ollama)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1325,7 +1325,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.11.3 (MLX + Ollama)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.11.4 (MLX + Ollama)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
@@ -3328,7 +3328,7 @@ INDEX_HTML = """<!DOCTYPE html>
 
     async function importGguf(path, name) {
       if (!path) { alert('No local file path for this model.'); return; }
-      const base = (name || path.split('/').pop()).replace(/\.gguf$/i, '');
+      const base = (name || path.split('/').pop()).replace(/\\.gguf$/i, '');
       const suggested = base.toLowerCase().replace(/[^a-z0-9._:-]+/g, '-').replace(/^-+|-+$/g, '');
       // Ask Ollama whether it already holds this exact file before offering a copy.
       let existing = '';
@@ -3338,13 +3338,13 @@ INDEX_HTML = """<!DOCTYPE html>
         existing = cd.tag || '';
       } catch (e) { /* offline check is best-effort */ }
       if (existing) {
-        alert('This file is already in Ollama as "' + existing + '".\n\nNothing to do — use that model directly.');
+        alert('This file is already in Ollama as "' + existing + '".\\n\\nNothing to do — use that model directly.');
         openOllamaModal();
         return;
       }
       const tag = prompt(
-        'Ollama keeps its own copy of every model, so importing copies this file into the store.\n' +
-        'The downloaded file can be deleted afterwards to get the space back.\n\n' +
+        'Ollama keeps its own copy of every model, so importing copies this file into the store.\\n' +
+        'The downloaded file can be deleted afterwards to get the space back.\\n\\n' +
         'Name it in Ollama (a tag like qwen2.5-coder:14b-q4):', suggested);
       if (!tag) return;
       try {
@@ -3359,8 +3359,8 @@ INDEX_HTML = """<!DOCTYPE html>
           alert('Already in Ollama as "' + shown + '". No second copy was made.');
         } else {
           const dir = path.substring(0, path.lastIndexOf('/'));
-          if (confirm('Imported "' + shown + '" into the Ollama store.\n\n' +
-                      'Delete the downloaded file now to reclaim the space?\n' +
+          if (confirm('Imported "' + shown + '" into the Ollama store.\\n\\n' +
+                      'Delete the downloaded file now to reclaim the space?\\n' +
                       '(Ollama has its own copy, so the model keeps working.)')) {
             await fetch('/api/delete', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
