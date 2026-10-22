@@ -1795,7 +1795,9 @@ def sync_dsh_models(provider_id=DSH_PROVIDER_ID, patch_path=None, models=None, d
             "name": None,
             "is_vision": m.get("is_vision"),
             "path": m.get("path"),
-        } for m in find_local_models()]
+        } for m in find_local_models()
+            # A GGUF folder is served by Ollama, not by a mlx_lm server on :9999.
+            if not (m.get("path") and local_gguf_files(m.get("path")))]
     prior = {e["id"]: e for e in read_dsh_models(provider_id, path).get("entries", [])}
     existing = {k: (v.get("name") or "") for k, v in prior.items()}
     seen, entries = set(), []

@@ -516,6 +516,12 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
 
             if st.get("auto_sync_agents", True):
                 mlx_helper.sync_pi_and_opencode(model_name, port=port, is_vision=is_vis)
+                # DSH reads its provider's model list from the profile patch at startup;
+                # skipping this is why a freshly started model never showed up there.
+                try:
+                    mlx_helper.sync_dsh_models()
+                except Exception:
+                    pass
 
             self.send_json({
                 "status": "ok",
@@ -958,7 +964,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
 
 # One source of truth for the release: the title, the badge and the banner all
 # read this, so they can no longer drift apart (v0.11.6 shipped a stale badge).
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 
 INDEX_HTML = """<!DOCTYPE html>
 <html lang="en">

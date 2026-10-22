@@ -441,6 +441,40 @@ def run():
         h.served_models = real_served
         h.ollama_harness_models = real_ol
 
+    # A GGUF folder is served by Ollama, so it must never be advertised as an
+    # MLX model on :9999 — and a launch must refresh DSH's list, not just Pi's.
+    real_find = h.find_local_models
+    real_gguf = h.local_gguf_files
+    try:
+        import tempfile as _tf
+        with _tf.TemporaryDirectory() as td:
+            patch = os.path.join(td, "cordis.patch.yml")
+            open(patch, "w").write(
+                "config:\n  providers:\n      mlx-local:\n"
+                "        displayName: MLX\n"
+                "        baseURL: http://127.0.0.1:9999/v1\n"
+                "        models:\n"
+                "          - id: old/model\n"
+                "        apiKeyEnv: MLX_LOCAL_API_KEY\n")
+            h.find_local_models = lambda: [
+                {"base_name": "org/Real-7B", "path": "/tmp/mlx-real"},
+                {"base_name": "org/Some-GGUF", "path": "/tmp/gguf-dir"},
+            ]
+            h.local_gguf_files = lambda d: ["x.gguf"] if d == "/tmp/gguf-dir" else []
+            res = h.sync_dsh_models(patch_path=patch)
+            ids = [e["id"] for e in res.get("entries", [])]
+            check("DSH sync skips GGUF folders", ids == ["org/Real-7B"], ids)
+            body = open(patch).read()
+            check("DSH sync writes the MLX model", "org/Real-7B" in body, body[:80])
+    finally:
+        h.find_local_models = real_find
+        h.local_gguf_files = real_gguf
+
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "mlx_gui_server.py")).read()
+    check("starting a model also refreshes DSH's model list",
+          "mlx_helper.sync_dsh_models()" in src, "sync_dsh_models call")
+
     passed = sum(1 for _, ok, _ in CHECKS if ok)
     print(f"\n{passed}/{len(CHECKS)} checks passed")
     return 0 if passed == len(CHECKS) else 1
