@@ -5,6 +5,7 @@
 
 import os
 import sys
+import time
 import json
 import urllib.request
 import urllib.parse
@@ -811,17 +812,19 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             self.send_json(res)
 
         elif path == "/api/test":
+            # Model-agnostic: any OpenAI-compatible endpoint can be tested, so the
+            # MLX servers and the Ollama engine both work from the same panel.
             st = mlx_helper.load_global_settings()
             prompt = payload.get("prompt", "Hello!")
-            model = payload.get("model", "default_model")
+            model = (payload.get("model") or "").strip()
+            base_url = (payload.get("base_url") or "").strip()
             port = payload.get("port", st.get("default_port", 9999))
             host = payload.get("host", "127.0.0.1")
             image_data = payload.get("image", "")
+            api_key = (payload.get("api_key") or "").strip()
 
-            url = f"http://{host}:{port}/v1/chat/completions"
-            test_model_name = "default_model"
-            if model and "/" in model:
-                test_model_name = model
+            url, test_model_name = mlx_helper.openai_target(
+                base_url, host=host, port=port, model=model)
 
             if image_data:
                 user_msg = {
@@ -837,16 +840,27 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             req_data = json.dumps({
                 "model": test_model_name,
                 "messages": [user_msg],
-                "max_tokens": 512
+                "max_tokens": int(payload.get("max_tokens") or 512),
+                "stream": False,
             }).encode("utf-8")
 
-            req = urllib.request.Request(url, data=req_data, headers={"Content-Type": "application/json"})
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            req = urllib.request.Request(url, data=req_data, headers=headers)
+            started = time.time()
             try:
-                with urllib.request.urlopen(req, timeout=120) as resp:
+                with urllib.request.urlopen(req, timeout=float(payload.get("timeout") or 300)) as resp:
                     res_data = json.loads(resp.read().decode("utf-8"))
-                    msg = res_data.get("choices", [{}])[0].get("message", {})
+                    elapsed = time.time() - started
+                    choice = (res_data.get("choices") or [{}])[0]
+                    msg = choice.get("message", {}) or {}
                     content = msg.get("content", "")
                     reasoning = msg.get("reasoning", "") or msg.get("reasoning_content", "")
+                    usage = res_data.get("usage") or {}
+                    completion_tokens = usage.get("completion_tokens") or 0
+                    prompt_tokens = usage.get("prompt_tokens") or 0
+                    rate = (completion_tokens / elapsed) if (completion_tokens and elapsed) else 0
 
                     _st = mlx_helper.load_global_settings()
                     full_output = ""
@@ -859,9 +873,14 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                     elif not full_output:
                         full_output = json.dumps(msg, indent=2)
 
-                    self.send_json({"status": "ok", "response": full_output})
+                    stats = {"elapsed": round(elapsed, 2), "rate": round(rate, 2),
+                             "prompt_tokens": prompt_tokens, "tokens": completion_tokens,
+                             "model": test_model_name, "finish_reason": choice.get("finish_reason")}
+                    self.send_json({"status": "ok", "response": full_output, "stats": stats,
+                                    "target": {"base_url": url.rsplit("/chat/completions", 1)[0],
+                                               "model": test_model_name}})
             except Exception as e:
-                self.send_json({"error": f"API request failed on http://{host}:{port}: {e}"}, 500)
+                self.send_json({"error": f"API request failed on {url}: {e}"}, 500)
 
         elif path == "/api/benchmark":
             st = mlx_helper.load_global_settings()
@@ -869,8 +888,9 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             model = payload.get("model", "default_model")
             port = payload.get("port", st.get("default_port", 9999))
             host = payload.get("host", "127.0.0.1")
+            base_url = (payload.get("base_url") or "").strip()
 
-            res = mlx_helper.run_model_benchmark(prompt, model, port=port, host=host)
+            res = mlx_helper.run_model_benchmark(prompt, model, port=port, host=host, base_url=base_url)
             self.send_json(res)
         elif path == "/api/kill_process":
             pid = payload.get("pid")
@@ -884,7 +904,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.11.4 (MLX + Ollama)</title>
+  <title>macOS MLX Control Center v0.11.5 (MLX + Ollama)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1325,7 +1345,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.11.4 (MLX + Ollama)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.11.5 (MLX + Ollama)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
@@ -1518,15 +1538,21 @@ INDEX_HTML = """<!DOCTYPE html>
   <!-- TAB 4: API & CHAT TEST (WITH VISION & IMAGE SUPPORT) -->
   <div id="tab-test" class="tab-content">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-      <h2 style="font-size: 18px; font-weight: 600;">Test Active MLX Model Server (Text & Vision)</h2>
+      <h2 style="font-size: 18px; font-weight: 600;">Test Any Model Engine (Text &amp; Vision)</h2>
       <button class="btn btn-secondary" onclick="loadTestServers()">🔄 Refresh Server List</button>
     </div>
     <div class="chat-box">
       <div style="margin-bottom: 16px;">
         <label style="display: block; font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--text-muted);">
-          Select Target Model Server:
+          Select Target Engine / Model:
         </label>
         <select id="testServerSelect" style="width: 100%; font-weight: 500;"></select>
+        <div style="display: flex; gap: 8px; margin-top: 8px; align-items: center;">
+          <input id="testBaseUrl" type="text" placeholder="Custom base URL (optional) — e.g. http://127.0.0.1:8000/v1"
+                 style="flex: 1; font-size: 12px; padding: 8px 10px;">
+          <button class="btn btn-secondary" style="padding: 8px 12px; font-size: 12px;" onclick="loadTestServers()" title="Re-scan engines and models">⟳</button>
+        </div>
+        <div id="testTargetHint" style="font-size: 11px; color: var(--text-muted); margin-top: 6px;"></div>
       </div>
 
       <!-- IMAGE ATTACHMENT FOR VISION TESTING -->
@@ -3070,34 +3096,71 @@ INDEX_HTML = """<!DOCTYPE html>
     async function loadTestServers() {
       const select = document.getElementById('testServerSelect');
       if (!select) return;
-
+      const hint = document.getElementById('testTargetHint');
       const currentVal = select.value;
       select.innerHTML = '';
-
+      let mlxCount = 0;
+      let ollamaCount = 0;
       try {
-        const res = await fetch('/api/status');
-        const data = await res.json();
-        const servers = data.servers || [];
+        const results = await Promise.all([
+          fetch('/api/status').then(r => r.json()).catch(() => ({})),
+          fetch('/api/ollama').then(r => r.json()).catch(() => ({}))
+        ]);
+        const servers = results[0].servers || [];
+        const ollama = results[1].ollama || {};
 
-        if (servers.length === 0) {
-          select.innerHTML = '<option value="">(No active MLX servers running)</option>';
-          return;
+        if (servers.length) {
+          const group = document.createElement('optgroup');
+          group.label = '⚡ MLX servers (Apple silicon)';
+          servers.forEach(srv => {
+            const host = srv.host || '127.0.0.1';
+            const opt = document.createElement('option');
+            opt.value = `${host}:${srv.port}`;
+            opt.setAttribute('data-base', `http://${host}:${srv.port}/v1`);
+            opt.setAttribute('data-model', 'default_model');
+            opt.setAttribute('data-host', host);
+            opt.setAttribute('data-port', srv.port);
+            opt.setAttribute('data-kind', 'mlx');
+            const engTag = (srv.engine === 'mlx-vlm' || srv.is_vision) ? '👁️ Vision' : '⚡ Text';
+            opt.innerText = `[Port ${srv.port} - ${engTag}] ${srv.model} (${srv.status})`;
+            group.appendChild(opt);
+          });
+          select.appendChild(group);
+          mlxCount = servers.length;
         }
 
-        servers.forEach(s => {
-          const opt = document.createElement('option');
-          opt.value = s.port;
-          opt.setAttribute('data-model', s.model);
-          opt.setAttribute('data-host', s.host || '127.0.0.1');
-          const engTag = (s.engine === 'mlx-vlm' || s.is_vision) ? '👁️ Vision' : '⚡ Text';
-          opt.innerText = `[Port ${s.port} - ${engTag}] ${s.model} (${s.status})`;
-          if (String(s.port) === String(currentVal)) {
-            opt.selected = true;
-          }
-          select.appendChild(opt);
-        });
+        const omodels = ollama.models || [];
+        if (ollama.running && omodels.length) {
+          const group = document.createElement('optgroup');
+          group.label = `🦙 Ollama engine (port ${ollama.port})`;
+          const base = (ollama.base_url || `http://127.0.0.1:${ollama.port}`) + '/v1';
+          omodels.forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = `ollama:${m.id}`;
+            opt.setAttribute('data-base', base);
+            opt.setAttribute('data-model', m.id);
+            opt.setAttribute('data-port', ollama.port);
+            opt.setAttribute('data-host', ollama.host || '127.0.0.1');
+            opt.setAttribute('data-kind', 'ollama');
+            const ctx = m.context ? ` · ${Math.round(m.context / 1024)}K ctx` : '';
+            opt.innerText = `[Ollama] ${m.id} — ${Number(m.size_gb || 0).toFixed(1)} GB${ctx}`;
+            group.appendChild(opt);
+          });
+          select.appendChild(group);
+          ollamaCount = omodels.length;
+        }
+
+        if (!select.options.length) {
+          select.innerHTML = '<option value="">(No engines running — start an MLX model or the Ollama daemon)</option>';
+        } else if (currentVal) {
+          Array.from(select.options).forEach(opt => { if (opt.value === currentVal) opt.selected = true; });
+        }
+        if (hint) {
+          hint.innerText = `${mlxCount} MLX server(s) · ${ollamaCount} Ollama model(s) · or paste any OpenAI-compatible base URL above`;
+        }
       } catch (e) {
         console.error(e);
+        select.innerHTML = '<option value="">(Could not enumerate engines)</option>';
       }
     }
 
@@ -3737,34 +3800,49 @@ INDEX_HTML = """<!DOCTYPE html>
     async function sendTestPrompt() {
       const prompt = document.getElementById('promptInput').value;
       const select = document.getElementById('testServerSelect');
-      if (!select || !select.value) {
-        alert("Please select a running MLX model server from the dropdown to test.");
+      const custom = (document.getElementById('testBaseUrl').value || '').trim();
+      const selectedOption = select ? select.options[select.selectedIndex] : null;
+      let baseUrl = custom || (selectedOption ? selectedOption.getAttribute('data-base') : '');
+      let model = selectedOption ? selectedOption.getAttribute('data-model') : '';
+      const port = selectedOption ? selectedOption.getAttribute('data-port') : null;
+      const host = selectedOption ? selectedOption.getAttribute('data-host') : '127.0.0.1';
+
+      if (!baseUrl) {
+        alert('Pick an engine/model from the list, or paste an OpenAI-compatible base URL (ending in /v1).');
         return;
       }
-      const port = parseInt(select.value);
-      const selectedOption = select.options[select.selectedIndex];
-      const model = selectedOption ? selectedOption.getAttribute('data-model') : '';
-      const host = selectedOption ? selectedOption.getAttribute('data-host') : '127.0.0.1';
+      if (custom) {
+        // A custom endpoint has no model list; ask for the id it expects.
+        model = prompt || '';
+        const wanted = window.prompt('Model id to send to this endpoint:', model === prompt ? '' : model);
+        if (wanted === null) return;
+        model = wanted.trim();
+        if (!model) { alert('A model id is required for a custom endpoint.'); return; }
+      }
 
       const chatOutput = document.getElementById('chatOutput');
       const hasImage = !!attachedTestImageBase64;
-      chatOutput.innerText = `⏳ Sending ${hasImage ? 'multimodal image + text' : 'text'} query to '${model}' on port ${port}... (Generating thinking & response tokens)`;
+      chatOutput.innerText = `⏳ Sending ${hasImage ? 'multimodal image + text' : 'text'} query to '${model}' at ${baseUrl}...`;
 
       try {
         const res = await fetch('/api/test', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            prompt: prompt, 
-            model: model, 
-            port: port, 
+          body: JSON.stringify({
+            prompt: prompt,
+            model: model,
+            base_url: baseUrl,
+            port: port,
             host: host,
-            image: attachedTestImageBase64 
+            image: attachedTestImageBase64
           })
         });
         const data = await res.json();
         if (data.response) {
-          chatOutput.innerText = `[Model: ${model} | Port: ${port}${hasImage ? ' | Multimodal Vision 👁️' : ''}]\n\n` + data.response;
+          const st = data.stats || {};
+          const head = `[Model: ${st.model || model} | ${baseUrl}${hasImage ? ' | Multimodal Vision 👁️' : ''}]` +
+            (st.tokens ? ` | ${st.tokens} tok in ${st.elapsed}s (${st.rate} tok/s)` : ` | ${st.elapsed || '?'}s`);
+          chatOutput.innerText = head + '\\n\\n' + data.response;
         } else {
           chatOutput.innerText = "Error: " + (data.error || "No response");
         }
@@ -3777,13 +3855,15 @@ INDEX_HTML = """<!DOCTYPE html>
       const prompt = document.getElementById('benchPromptInput').value;
       const select = document.getElementById('testServerSelect');
       if (!select || !select.value) {
-        alert("Please start an active MLX model server first to run benchmark.");
+        alert("Pick a running engine/model first to run the benchmark.");
         return;
       }
-      const port = parseInt(select.value);
       const selectedOption = select.options[select.selectedIndex];
       const model = selectedOption ? selectedOption.getAttribute('data-model') : '';
       const host = selectedOption ? selectedOption.getAttribute('data-host') : '127.0.0.1';
+      const port = selectedOption ? parseInt(selectedOption.getAttribute('data-port')) : null;
+      const baseUrl = (document.getElementById('testBaseUrl').value || '').trim() ||
+                      (selectedOption ? selectedOption.getAttribute('data-base') : '');
 
       const metricsCard = document.getElementById('benchMetricsCard');
       metricsCard.style.display = 'block';
@@ -3797,7 +3877,7 @@ INDEX_HTML = """<!DOCTYPE html>
         const res = await fetch('/api/benchmark', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt: prompt, model: model, port: port, host: host })
+          body: JSON.stringify({ prompt: prompt, model: model, port: port, host: host, base_url: baseUrl })
         });
         const data = await res.json();
         

@@ -4059,11 +4059,23 @@ def compare_models_ai(repo_ids):
 
     return {"comparisons": comparisons, "free_ram_gb": free_ram, "total_ram_gb": total_ram}
 
-def run_model_benchmark(prompt, model, port=9999, host="127.0.0.1"):
-    url = f"http://{host}:{port}/v1/chat/completions"
-    test_model_name = "default_model"
-    if model and "/" in model:
-        test_model_name = model
+def openai_target(base_url="", host="127.0.0.1", port=9999, model=""):
+    """Resolve (chat-completions URL, model id) for any OpenAI-compatible engine.
+
+    MLX servers are one process per port and ignore the model name; Ollama is one
+    daemon for many models, so the id has to be the exact tag. Keeping this rule
+    in one place is what makes the test panel engine-agnostic.
+    """
+    base = (base_url or "").strip()
+    if base:
+        url = base.rstrip("/") + "/chat/completions"
+    else:
+        url = f"http://{host}:{port}/v1/chat/completions"
+    return url, ((model or "").strip() or "default_model")
+
+def run_model_benchmark(prompt, model, port=9999, host="127.0.0.1", base_url=""):
+    """Benchmark any OpenAI-compatible endpoint — MLX servers and Ollama alike."""
+    url, test_model_name = openai_target(base_url, host=host, port=port, model=model)
 
     req_data = json.dumps({
         "model": test_model_name,
