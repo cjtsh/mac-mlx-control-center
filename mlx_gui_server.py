@@ -123,7 +123,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             listed = mlx_helper.read_dsh_models()
             installed = []
             for m in mlx_helper.find_local_models():
-                rid = m.get("repo_id") or m.get("name")
+                rid = m.get("repo_id") or m.get("base_name") or m.get("name")
                 if rid and rid not in installed:
                     installed.append(rid)  # same repo can sit on two drives
             listed_ids = [e["id"] for e in listed.get("entries", [])]
@@ -793,7 +793,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.8.8 (Thinking Control)</title>
+  <title>macOS MLX Control Center v0.8.9 (Vision Sync)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1234,7 +1234,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.8.8 (Thinking Control)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.8.9 (Vision Sync)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>

@@ -786,8 +786,34 @@ def read_dsh_models(provider_id=DSH_PROVIDER_ID, patch_path=None):
                     entries[-1].setdefault("extra", []).append(line.strip())
     return {"ok": True, "patch": path, "provider": provider_id, "entries": entries}
 
+def _dsh_entry_is_vision(model):
+    """Best-effort image capability for one sync entry.
+
+    `find_local_models()` already resolves this from config.json; callers that pass
+    bare repo ids get a second chance by inspecting the local snapshot before the
+    name heuristic in `is_vision_model()`.
+    """
+    flag = model.get("is_vision")
+    if flag is not None:
+        return bool(flag)
+    rid = (model.get("id") or "").strip()
+    candidates = []
+    if model.get("path"):
+        candidates.append(model["path"])
+    if rid:
+        candidates.extend(_snapshot_dirs(rid))
+    for cand in candidates:
+        if cand and os.path.isdir(cand) and is_vision_model(cand):
+            return True
+    return is_vision_model(rid) if rid else False
+
 def sync_dsh_models(provider_id=DSH_PROVIDER_ID, patch_path=None, models=None, dry_run=False):
     """Rewrite the provider's `models:` block with one entry per installed model.
+
+    Vision models also get `input: [text, image]`. DSH treats a custom
+    OpenAI-compatible provider as text-only unless the model declares image support,
+    so without this line every attachment is rejected before it reaches the server.
+    Hand-edited per-model lines (including `input`) are preserved.
 
     The DSH desktop profile loads this file at startup, so a restart is needed to see
     the result — which is exactly why regenerating it by hand is a chore worth automating.
@@ -797,7 +823,12 @@ def sync_dsh_models(provider_id=DSH_PROVIDER_ID, patch_path=None, models=None, d
         return {"ok": False, "error": "no DeepSeek Harness profile at " + path, "patch": path}
     if models is None:
         # name=None keeps any hand-written label already in the patch file
-        models = [{"id": m.get("repo_id") or m.get("name"), "name": None} for m in find_local_models()]
+        models = [{
+            "id": m.get("repo_id") or m.get("base_name") or m.get("name"),
+            "name": None,
+            "is_vision": m.get("is_vision"),
+            "path": m.get("path"),
+        } for m in find_local_models()]
     prior = {e["id"]: e for e in read_dsh_models(provider_id, path).get("entries", [])}
     existing = {k: (v.get("name") or "") for k, v in prior.items()}
     seen, entries = set(), []
@@ -809,6 +840,8 @@ def sync_dsh_models(provider_id=DSH_PROVIDER_ID, patch_path=None, models=None, d
         label = (m.get("name") or existing.get(rid) or dsh_model_label(rid)).strip()
         extra = list((prior.get(rid) or {}).get("extra") or [])
         have = {line.split(":")[0].strip() for line in extra}
+        if _dsh_entry_is_vision(m) and "input" not in have:
+            extra.insert(0, "input: [text, image]")
         cap = context_window_cap()
         ctx = cap if cap else (model_context_profile(rid).get("recommended") or model_context_window(rid))
         native = model_context_window(rid)
@@ -1240,57 +1273,127 @@ def save_paused_downloads(data):
     except Exception:
         pass
 
-def is_vision_model(model_path_or_id, config_dict=None):
-    """Accurately detects whether a local path or Hugging Face model ID is a Vision / Multimodal model."""
-    name_check = str(model_path_or_id).lower()
-    
-    # 1. Inspect config dictionary or config.json if available
-    cfg = config_dict
-    if cfg is None and os.path.exists(str(model_path_or_id)):
-        cfg_file = os.path.join(model_path_or_id, "config.json")
-        if os.path.exists(cfg_file):
-            try:
-                with open(cfg_file, "r", errors="ignore") as f:
-                    cfg = json.load(f)
-            except Exception:
-                cfg = None
-                
-    if isinstance(cfg, dict):
-        model_type = str(cfg.get("model_type", "")).lower()
-        archs = [str(a).lower() for a in cfg.get("architectures", []) if a]
-        
-        vision_model_types = {
-            "gemma4", "gemma4_unified", "gemma4_unified_audio", "gemma3", "gemma3_vl",
-            "qwen2_vl", "qwen2_5_vl", "qwen_vl", "mllama", "paligemma", "paligemma2",
-            "pixtral", "llava", "llava_next", "llava_hound", "internvl_chat", "smolvlm",
-            "florence2", "phi3_v", "chameleon", "minicpmv", "molmo", "idefics2", "idefics3",
-            "multi_modality", "blip-2", "vision-encoder-decoder", "mistral3"
-        }
-        if model_type in vision_model_types:
-            return True
-            
-        if isinstance(cfg.get("vision_config"), dict) and len(cfg["vision_config"]) > 0:
-            return True
-            
-        for a in archs:
-            if any(k in a for k in ["qwen2vl", "qwen2_5_vl", "qwenvl", "gemma4", "paligemma", "pixtral", "mllama", "llava", "molmo", "smolvlm", "vision", "multimodality"]):
-                return True
+def _read_json_file(path):
+    try:
+        with open(path, "r", errors="ignore") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
-    # 2. Check if preprocessor or processor config exists in local directory
-    if os.path.isdir(str(model_path_or_id)):
-        if os.path.exists(os.path.join(model_path_or_id, "preprocessor_config.json")) or \
-           os.path.exists(os.path.join(model_path_or_id, "processor_config.json")):
-            return True
+_VISION_MODEL_TOKENS = (
+    "vision", "multimodal", "multi_mod", "vlm", "omni", "llava", "paligemma",
+    "pixtral", "mllama", "idefics", "molmo", "smolvlm", "internvl", "minicpmv",
+    "florence", "chameleon", "blip", "fuyu", "kosmos", "donut", "pix2struct",
+    "qwen2vl", "qwen2_5_vl", "qwen3vl", "qwen_vl", "gemma3", "gemma4",
+    "phi3_v", "phi3v", "mistral3",
+)
+_VISION_CONFIG_KEYS = (
+    "vision_config", "vision_tower", "mm_vision_tower", "multi_modal_projector",
+    "mm_projector_type", "projector_type", "image_token_id", "image_token_index",
+    "vision_feature_layer", "vision_feature_select_strategy", "image_seq_length",
+    "vision_soft_tokens_per_image",
+)
+_VISION_WEIGHT_HINTS = (
+    "vision_tower", "vision_model", "vision_encoder", "visual.", "visual_encoder",
+    "multi_modal_projector", "mm_projector", "image_encoder", "image_projection",
+    "vision_projection",
+)
 
-    # 3. Explicitly exclude code reasoning / distilled text LLMs that lack vision towers
-    if any(k in name_check for k in ["code-reasoning", "deepseek-v4", "r1-distill", "coder"]):
+def _model_type_is_vision(value):
+    text = str(value or "").lower()
+    if not text:
         return False
+    if any(tok in text for tok in _VISION_MODEL_TOKENS):
+        return True
+    # Arch-independent conventions: Qwen2VL / InternVL / SmolVLM / ...
+    return "_vl" in text or text.endswith("vl") or text.startswith("vl")
 
-    # 4. Specific Keyword / Substring heuristics on model ID / path
-    vision_keywords = ["-vl-", "-vl", "qwen2-vl", "qwen2.5-vl", "qwen3-vl", "gemma-4", "gemma-3", "paligemma", "pixtral", "llava", "smolvlm", "minicpm-v", "florence", "internvl", "molmo", "vision"]
-    if any(k in name_check for k in vision_keywords):
+def _config_declares_vision(cfg):
+    if not isinstance(cfg, dict):
+        return False
+    if _model_type_is_vision(cfg.get("model_type")):
+        return True
+    if _model_type_is_vision(" ".join(str(a) for a in (cfg.get("architectures") or []))):
+        return True
+    for key in _VISION_CONFIG_KEYS:
+        val = cfg.get(key)
+        if val not in (None, "", False, [], {}):
+            return True
+    return False
+
+def _image_processor_declares_vision(cfg):
+    """True when a preprocessor/processor JSON describes image (not audio) work."""
+    if not isinstance(cfg, dict):
+        return False
+    if cfg.get("image_processor_type") or cfg.get("image_processor"):
+        return True
+    image_keys = ("image_mean", "image_std", "crop_size", "do_resize", "patch_size", "image_size")
+    audio_keys = ("feature_extractor_type", "sampling_rate", "feature_size", "chunk_length", "n_fft", "hop_length")
+    return any(k in cfg for k in image_keys) and not any(k in cfg for k in audio_keys)
+
+def _safetensors_declare_vision(model_dir):
+    """Read only the JSON headers: vision towers are visible in the weight names."""
+    names = []
+    index_path = os.path.join(model_dir, "model.safetensors.index.json")
+    index = _read_json_file(index_path) if os.path.isfile(index_path) else None
+    if isinstance(index, dict) and index.get("weight_map"):
+        names = list(index["weight_map"].keys())
+    else:
+        try:
+            shards = sorted(f for f in os.listdir(model_dir) if f.endswith(".safetensors"))[:8]
+        except Exception:
+            shards = []
+        for fn in shards:
+            try:
+                with open(os.path.join(model_dir, fn), "rb") as f:
+                    size = int.from_bytes(f.read(8), "little")
+                    if 0 < size <= 64 * 1024 * 1024:
+                        header = json.loads(f.read(size))
+                        names.extend(header.keys())
+            except Exception:
+                continue
+    return any(hint in name for name in names for hint in _VISION_WEIGHT_HINTS)
+
+def is_vision_model(model_path_or_id, config_dict=None):
+    """Detect image input from model config, processor files, or weight names.
+
+    Capability is read from the model itself, never from a fixed list of families:
+    a `vision_config`/`image_token_id`, an image processor, or a `vision_tower` in
+    the weights all count, so a new multimodal architecture is picked up without a
+    code change. Name heuristics are only a fallback for remote repo ids.
+    """
+    path = str(model_path_or_id)
+    name_check = path.lower()
+    is_dir = os.path.isdir(path)
+
+    cfg = config_dict
+    if cfg is None and is_dir:
+        cfg = _read_json_file(os.path.join(path, "config.json"))
+    if _config_declares_vision(cfg):
         return True
 
+    if is_dir:
+        for fn in ("preprocessor_config.json", "processor_config.json",
+                   "video_preprocessor_config.json", "image_processor_config.json"):
+            proc = _read_json_file(os.path.join(path, fn))
+            if _image_processor_declares_vision(proc):
+                return True
+        if _safetensors_declare_vision(path):
+            return True
+
+    # Last resort for remote repo ids: nothing local to inspect.
+    vision_keywords = (
+        "-vl-", "-vl", "_vl", "vl-", "vlm", "vision", "multimodal", "multi-modal",
+        "llava", "paligemma", "pixtral", "mllama", "idefics", "smolvlm",
+        "internvl", "minicpm-v", "florence", "molmo", "chameleon", "blip",
+        "fuyu", "kosmos", "donut", "pix2struct", "gemma-3", "gemma-4",
+        "qwen2-vl", "qwen2.5-vl", "qwen3-vl", "phi-3-vision", "mistral-small-3.1",
+        "omni",
+    )
+    if any(k in name_check for k in vision_keywords):
+        return True
+    if any(k in name_check for k in ("code-reasoning", "r1-distill", "coder")):
+        return False
     return False
 
 def sync_pi_and_opencode(active_model, port=9999, is_vision=False):

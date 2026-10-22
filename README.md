@@ -1,5 +1,5 @@
 
-# ⚡ macOS MLX Control Center `v0.8.8` (Thinking Control Edition)
+# ⚡ macOS MLX Control Center `v0.8.9` (Vision Sync Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -39,6 +39,7 @@ curl -sSL https://raw.githubusercontent.com/cjtsh/mac-mlx-control-center/main/in
 Most local LLM runners are either overly complex, hog system menubars, or require manual hand-editing of configuration JSON files for coding tools. **macOS MLX Control Center** solves this with:
 
 * 📦 **Serves from your drive (v0.8.5)**: repo-id requests reuse the weights already on the external drive (`HF_HUB_CACHE` is pointed at the library) instead of silently re-downloading into `~/.cache`.
+* 👁️ **Harness Vision Sync (v0.8.9)**: the one-click Harness sync now declares `input: [text, image]` for vision models, so DeepSeek Harness forwards image attachments to `mlx-vlm` instead of rejecting them with *"The current model does not support images"* — DSH treats custom OpenAI-compatible providers as text-only until a model says otherwise.
 * 🔄 **One-Click Harness Sync (v0.8.4)**: every installed model is written into your DeepSeek Harness `mlx-local` provider by a single button (or `./mlx.sh sync-harness`) — no hand-editing YAML, no retyping repo ids.
 * ⚡ **Fast, Resumable Downloads + Optional HF Login (v0.8.0)**: Large models now download over **8 parallel HTTPS range requests** instead of one throttled stream (measured on this line: 74 KB/s single connection → **2.2 MB/s** with 8), with byte-accurate progress, real MB/s, ETA, a **90-second stall watchdog** that restarts dead transfers automatically, and a **"🤗 Sign in" button** that uses HF's device flow so each user authorises *their own* account — the token goes into the macOS Keychain, never into this repo.
 * 🧠 **Auto Context Windows (v0.8.7)**: every model reports its own native window (read from `config.json`), the dashboard shows it on the card, and servers are started with a RAM-safe `--max-kv-size`. No hand-math.
@@ -175,10 +176,10 @@ The recommended window is `min(native, RAM-safe)` — normally just the native w
 
 * model cards show `🧠 Context: 256K tokens`
 * `Settings → Context Window` is **Auto** by default (per-model native); pick 32K/64K/128K/256K to force a cheaper cap — it is applied as `--max-kv-size` and can never exceed the model's own maximum
-* `./mlx.sh sync-harness` writes `contextWindow` + `maxTokens` into the DeepSeek Harness profile, so the harness compresses at the right point instead of assuming 200K
+* `./mlx.sh sync-harness` writes `contextWindow`, `maxTokens`, and image modality (`input: [text, image]` for vision models) into the DeepSeek Harness profile, so the harness compresses at the right point instead of assuming 200K and accepts image attachments
 * hand-edited capacity values in the harness profile are preserved across syncs
 
-## 🔄 Sync Installed Models into DeepSeek Harness (New in v0.8.4)
+## 🔄 Sync Installed Models into DeepSeek Harness (v0.8.4, vision fix in v0.8.9)
 
 DeepSeek Harness reads its model list from a profile file (`~/.dsh/profiles/desktop/cordis.patch.yml`), one entry per model id. Nothing discovers your local server on its own, so a freshly downloaded model used to mean hand-editing YAML — and because the **desktop** profile only applies patches at startup, getting it wrong is invisible until a restart.
 
@@ -194,9 +195,10 @@ What a sync does:
 
 * reads installed models from every library drive (deduplicated, so a model present on two drives appears once);
 * rewrites only the `models:` block of the `mlx-local` provider, keeping the rest of your file byte-identical;
+* **declares image input for vision models** (`input: [text, image]`), detected from each model's own files (`config.json`, image processor, or vision weights); DSH otherwise treats a custom OpenAI-compatible provider as text-only and rejects attachments before they reach the server. Hand-edited `input` lines are preserved;
 * **keeps hand-written labels** for models already listed, and generates readable ones for new repos (`sh0wie/Qwen3.8-...-REAP-288-MLX-4bit` → `Qwen3.8 Flash Next REAP 288 4-bit (MLX)`);
 * writes a timestamped backup next to the file (`cordis.patch.yml.bak-YYYYMMDD-HHMMSS`) before touching it;
-* never stores credentials — the provider has no `apiKeyEnv`, so nothing secret enters the profile.
+* never writes credentials into the profile — an `apiKeyEnv` you added yourself is left untouched.
 
 Same thing from the terminal:
 
@@ -205,6 +207,8 @@ Same thing from the terminal:
 ```
 
 Restart DeepSeek Harness afterwards (the desktop profile loads the file at startup); then pick the model under the **MLX (this Mac)** provider. The model id **must be the Hugging Face repo id**, because `mlx-vlm` treats the request's `model` field as a repository to load — a cosmetic alias like `mlx-local` returns `404 Repository Not Found`.
+
+If DSH still says *"The current model does not support images"*, re-run the sync and restart DSH. The model must be a vision model (`👁️ Vision` on its dashboard card, launched with `mlx-vlm`); a text-only model is deliberately left without image input.
 
 ## 💾 Multi-Drive Model Libraries (New in v0.7)
 
