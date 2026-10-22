@@ -218,8 +218,11 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             quant = query.get("quant", [""])[0].strip()
             max_ram = float(query.get("max_ram", ["0"])[0] or 0) or None
             usable = mlx_helper.get_usable_ram_gb()
+            min_params = float(query.get("min_params", ["0"])[0] or 0) or None
+            max_params = float(query.get("max_params", ["0"])[0] or 0) or None
             results = mlx_helper.search_hf_api(q, limit=limit, sort=sort, filter_tags=filter_tags,
                                                quant=quant or None,
+                                               min_params=min_params, max_params=max_params,
                                                max_ram=max_ram, usable_ram_gb=usable, enrich=False)
             stats = mlx_helper.get_system_stats()
             self.send_json({"results": results, "free_ram_gb": stats.get("free_ram_gb", 16.0),
@@ -925,7 +928,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
 
 # One source of truth for the release: the title, the badge and the banner all
 # read this, so they can no longer drift apart (v0.11.6 shipped a stale badge).
-APP_VERSION = "0.11.13"
+APP_VERSION = "0.11.14"
 
 INDEX_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -1526,6 +1529,33 @@ INDEX_HTML = """<!DOCTYPE html>
           <option value="6">6-bit</option>
           <option value="8">8-bit</option>
           <option value="16">16-bit</option>
+        </select>
+        <span style="font-size: 12px; color: var(--text-muted); margin-left: 4px;" title="Filter by parameter count: '70B range' = 60 to 80">Size:</span>
+        <select id="minParamsSelect" onchange="doSearch()" title="Lower bound of the model's parameter count"
+                style="padding: 6px 12px !important; font-size: 12px !important; border-color: rgba(99, 102, 241, 0.55); background: rgba(99, 102, 241, 0.12); font-weight: 600;">
+          <option value="">Any</option>
+          <option value="1">≥ 1B</option>
+          <option value="3">≥ 3B</option>
+          <option value="7">≥ 7B</option>
+          <option value="13">≥ 13B</option>
+          <option value="24">≥ 24B</option>
+          <option value="30">≥ 30B</option>
+          <option value="40">≥ 40B</option>
+          <option value="60">≥ 60B</option>
+          <option value="70">≥ 70B</option>
+          <option value="100">≥ 100B</option>
+        </select>
+        <span style="font-size: 12px; color: var(--text-muted);">to</span>
+        <select id="maxParamsSelect" onchange="doSearch()" title="Upper bound of the model's parameter count"
+                style="padding: 6px 12px !important; font-size: 12px !important; border-color: rgba(99, 102, 241, 0.55); background: rgba(99, 102, 241, 0.12); font-weight: 600;">
+          <option value="">Any</option>
+          <option value="8">≤ 8B</option>
+          <option value="14">≤ 14B</option>
+          <option value="32">≤ 32B</option>
+          <option value="40">≤ 40B</option>
+          <option value="80">≤ 80B</option>
+          <option value="120">≤ 120B</option>
+          <option value="200">≤ 200B</option>
         </select>
         <span style="font-size: 12px; color: var(--text-muted); margin-left: 4px;">RAM Budget:</span>
         <select id="ramSelect" onchange="renderSearchCards(currentSearchQuery)" title="Only show models that fit within this much RAM"
@@ -3676,7 +3706,9 @@ INDEX_HTML = """<!DOCTYPE html>
 
       const quant = quantFilterValue();
       const tagsParam = [...activeTags].join(',');
-      const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&sort=${sort}&limit=${limit}&tags=${encodeURIComponent(tagsParam)}&quant=${encodeURIComponent(quant)}`);
+      const minP = (document.getElementById('minParamsSelect') || {}).value || '';
+      const maxP = (document.getElementById('maxParamsSelect') || {}).value || '';
+      const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&sort=${sort}&limit=${limit}&tags=${encodeURIComponent(tagsParam)}&quant=${encodeURIComponent(quant)}&min_params=${encodeURIComponent(minP)}&max_params=${encodeURIComponent(maxP)}`);
       const data = await res.json();
       currentFreeRam = data.free_ram_gb || currentFreeRam;
       if (data.usable_ram_gb) {

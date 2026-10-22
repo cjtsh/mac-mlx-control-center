@@ -4114,7 +4114,7 @@ def _repo_mentions_code(repo_id):
 
 def search_hf_api(query, limit=50, sort="downloads", direction=-1, filter_tag="mlx",
                   filter_tags=None, quant=None, max_ram=None, min_ram=None,
-                  usable_ram_gb=None, enrich=True):
+                  min_params=None, max_params=None, usable_ram_gb=None, enrich=True):
     """Search Hugging Face with COMBINABLE filters.
 
     filter_tags: list/set of any of {"mlx", "vision", "code"} — all must match (AND).
@@ -4135,6 +4135,20 @@ def search_hf_api(query, limit=50, sort="downloads", direction=-1, filter_tag="m
         fetch_limit = min(limit * 4, 400)
 
     params = [f"search={q}", f"limit={fetch_limit}", f"sort={api_sort}", f"direction={direction}"]
+
+    # Parameter-count range, in billions. Hugging Face has a server-side filter
+    # for this (num_parameters=min:60B,max:80B) and it is the only way to ask for
+    # "70B models" instead of "anything under 90 GB".
+    lo = float(min_params) if min_params not in (None, "", 0, "0") else None
+    hi = float(max_params) if max_params not in (None, "", 0, "0") else None
+    if lo is not None and hi is not None and lo > hi:
+        lo, hi = hi, lo
+    if lo is not None and hi is not None:
+        params.append(f"num_parameters=min:{lo:g}B,max:{hi:g}B")
+    elif lo is not None:
+        params.append(f"num_parameters=min:{lo:g}B")
+    elif hi is not None:
+        params.append(f"num_parameters=max:{hi:g}B")
     if "mlx" in tags:
         params.append("filter=mlx")
     if "gguf" in tags:
@@ -4157,6 +4171,12 @@ def search_hf_api(query, limit=50, sort="downloads", direction=-1, filter_tag="m
                 is_vis = is_vision_model(repo_id) or pipeline_tag == "image-text-to-text" or "vision" in item_tags or "multimodal" in item_tags
                 if "vision" in tags and not is_vis:
                     continue
+                if lo is not None or hi is not None:
+                    # The server-side filter misses repos with no declared size, so
+                    # drop anything whose own name contradicts the range.
+                    pb = _parse_params_from_name(repo_id)
+                    if pb and ((lo is not None and pb < lo * 0.9) or (hi is not None and pb > hi * 1.1)):
+                        continue
                 q_label = _detect_quant_label(repo_id)
                 if quant and q_label and q_label != f"{quant}-bit":
                     continue
@@ -4185,6 +4205,13 @@ def search_hf_api(query, limit=50, sort="downloads", direction=-1, filter_tag="m
             results = [r for r in results if not r.get("est_ram_gb") or r["est_ram_gb"] <= float(max_ram)]
         if min_ram:
             results = [r for r in results if not r.get("est_ram_gb") or r["est_ram_gb"] >= float(min_ram)]
+        if lo is not None or hi is not None:
+            def _in_range(r):
+                pb = r.get("params_b") or _parse_params_from_name(r.get("id", ""))
+                if not pb:
+                    return True
+                return (lo is None or pb >= lo * 0.9) and (hi is None or pb <= hi * 1.1)
+            results = [r for r in results if _in_range(r)]
     if size_sort and results:
         results.sort(key=lambda r: r.get("est_ram_gb") or 0.0, reverse=(sort == "size_desc"))
     return results

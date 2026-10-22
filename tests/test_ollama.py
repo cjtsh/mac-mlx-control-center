@@ -345,6 +345,47 @@ def run():
         h.ollama_harness_models = real_models
         os.path.expanduser = real_expanduser
 
+    # ---- HF search: a lower bound on model size, not just an upper one ----
+    real_urlopen = h.urllib.request.urlopen
+
+    class _SearchResp:
+        def __init__(self, payload):
+            self.payload = payload
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+    seen_urls = []
+
+    def fake_search(req, timeout=None):
+        seen_urls.append(req.full_url if hasattr(req, "full_url") else str(req))
+        return _SearchResp([
+            {"id": "org/Qwen2.5-VL-72B-Instruct-GGUF", "tags": ["gguf"], "pipeline_tag": "image-text-to-text"},
+            {"id": "org/Qwen2.5-7B-Instruct-GGUF", "tags": ["gguf"], "pipeline_tag": "text-generation"},
+            {"id": "org/mystery-GGUF", "tags": ["gguf", "multimodal"], "pipeline_tag": "image-text-to-text"},
+        ])
+
+    try:
+        h.urllib.request.urlopen = fake_search
+        res = h.search_hf_api("qwen", limit=10, filter_tags=["gguf", "vision"],
+                              min_params=60, max_params=80, enrich=False)
+        check("search asks HF for the parameter range",
+              any("num_parameters=min:60B,max:80B" in u for u in seen_urls), seen_urls)
+        ids = [r["id"] for r in res]
+        check("a 72B model survives a 60-80B filter", any("72B" in i for i in ids), ids)
+        check("a 7B model is dropped by a 60-80B filter", not any("7B-" in i for i in ids), ids)
+        check("a model with no stated size is kept", any("mystery" in i for i in ids), ids)
+
+        seen_urls.clear()
+        h.search_hf_api("qwen", limit=10, filter_tags=["gguf"], min_params=13, enrich=False)
+        check("a lower bound alone is sent",
+              any("num_parameters=min:13B" in u for u in seen_urls), seen_urls)
+    finally:
+        h.urllib.request.urlopen = real_urlopen
+
     passed = sum(1 for _, ok, _ in CHECKS if ok)
     print(f"\n{passed}/{len(CHECKS)} checks passed")
     return 0 if passed == len(CHECKS) else 1

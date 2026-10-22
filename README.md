@@ -1,5 +1,5 @@
 
-# ⚡ macOS MLX Control Center `v0.11.13` (MLX + Ollama Edition)
+# ⚡ macOS MLX Control Center `v0.11.14` (MLX + Ollama Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
