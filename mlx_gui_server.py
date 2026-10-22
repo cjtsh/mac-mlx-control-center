@@ -90,6 +90,10 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
     def send_html(self, html_content, status_code=200):
         self.send_response(status_code)
         self.send_header("Content-type", "text/html; charset=utf-8")
+        # The dashboard is one inlined document that changes with every release:
+        # a cached copy shows buttons that no longer exist.
+        self.send_header("Cache-Control", "no-store, max-age=0")
+        self.send_header("Pragma", "no-cache")
         self.end_headers()
         self.wfile.write(html_content.encode("utf-8"))
 
@@ -909,7 +913,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.11.8 (MLX + Ollama)</title>
+  <title>macOS MLX Control Center v0.11.9 (MLX + Ollama)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1402,7 +1406,7 @@ INDEX_HTML = """<!DOCTYPE html>
   <!-- TAB 1: DASHBOARD -->
   <div id="tab-dashboard" class="tab-content active">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 10px;">
-      <h2 style="font-size: 18px; font-weight: 600;">Active MLX Model Servers</h2>
+      <h2 style="font-size: 18px; font-weight: 600;">Active Models</h2>
       <button class="btn btn-danger" onclick="killAllServers()">⚡ KILL SWITCH (Stop All)</button>
     </div>
     <div id="activeServerContainer" class="grid" style="margin-bottom: 24px;"></div>
@@ -3129,10 +3133,10 @@ INDEX_HTML = """<!DOCTYPE html>
                     </div>
                   </div>
                   <div class="card-meta">
-                    <span>Memory: <strong style="color: #f3f4f6;">${l.vram_gb || l.size_gb} GB</strong></span>
+                    <span>Memory: <strong style="color: #f3f4f6;">${(olLoaded.length === 1 && stats.model_ram_gb) ? stats.model_ram_gb : (l.vram_gb || l.size_gb)} GB</strong>${(olLoaded.length === 1 && stats.model_ram_gb && Math.abs(stats.model_ram_gb - (l.vram_gb || l.size_gb)) > 0.5) ? ` <span style="color: var(--text-muted);">(reserves ${l.vram_gb || l.size_gb} GB)</span>` : ''}</span>
                     ${l.context ? `<span>Context: <strong style="color: #f3f4f6;">${Math.round(l.context / 1024)}K</strong></span>` : ''}
                     <span>Port: <strong style="color: #f3f4f6;">${ol.port || 11434}</strong></span>
-                    <span>Endpoint: <code style="color: #60a5fa;">${(ol.base_url || 'http://127.0.0.1:11434') + '/v1'}</code></span>
+                    <span>Endpoint: <code style="color: #60a5fa;">${(() => { const b = ol.base_url || 'http://127.0.0.1:11434'; return b.replace(/\/+$/, '').endsWith('/v1') ? b.replace(/\/+$/, '') : b.replace(/\/+$/, '') + '/v1'; })()}</code></span>
                   </div>
                 </div>
                 <div class="card-actions">
