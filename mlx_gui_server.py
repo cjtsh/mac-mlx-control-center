@@ -928,14 +928,14 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
 
 # One source of truth for the release: the title, the badge and the banner all
 # read this, so they can no longer drift apart (v0.11.6 shipped a stale badge).
-APP_VERSION = "0.11.14"
+APP_VERSION = "1.0.0"
 
 INDEX_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v""" + APP_VERSION + """ (MLX + Ollama)</title>
+  <title>macOS LLM Control Center v""" + APP_VERSION + """ (MLX + Ollama)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1375,7 +1375,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div class="brand-icon">⚡</div>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
-          macOS MLX Control Center
+          macOS LLM Control Center
           <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v""" + APP_VERSION + """ (MLX + Ollama)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
@@ -4297,7 +4297,7 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Download watchdog not started: {e}")
     server = ThreadedHTTPServer(("127.0.0.1", PORT), MLXGuiHandler)
-    print(f"macOS MLX Control Center GUI Server running at http://127.0.0.1:{PORT}")
+    print(f"macOS LLM Control Center GUI Server running at http://127.0.0.1:{PORT}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -1,11 +1,11 @@
 #!/bin/bash
-# ⚡ macOS MLX Control Center - 1-Click Installer & Launcher
+# ⚡ macOS LLM Control Center - 1-Click Installer & Launcher
 set -e
 
 export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$HOME/.local/bin:$HOME/.cargo/bin:$HOME/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
 echo "========================================================"
-echo "⚡ macOS MLX Control Center - 1-Click Launcher & Setup"
+echo "⚡ macOS LLM Control Center - 1-Click Launcher & Setup"
 echo "========================================================"
 
 TARGET_DIR="$HOME/mac-mlx-control-center"
@@ -41,7 +41,7 @@ fi
 
 # 3. Clone or Update Repository
 if [ ! -d "$TARGET_DIR" ]; then
-    echo "📦 Cloning macOS MLX Control Center to $TARGET_DIR..."
+    echo "📦 Cloning macOS LLM Control Center to $TARGET_DIR..."
     git clone https://github.com/cjtsh/mac-mlx-control-center.git "$TARGET_DIR"
 else
     echo "🔄 Updating repository in $TARGET_DIR..."
@@ -124,15 +124,15 @@ PY
 make_alias() {
     osascript <<'APPLESCRIPT' >/dev/null 2>&1 || true
 tell application "Finder"
-    if exists alias file "MLX Controller" of desktop then
-        delete alias file "MLX Controller" of desktop
+    if exists alias file "LLM Controller" of desktop then
+        delete alias file "LLM Controller" of desktop
     end if
     set appAlias to make alias file to POSIX file "/Applications/MLXController.app" at desktop
-    set name of appAlias to "MLX Controller"
+    set name of appAlias to "LLM Controller"
 end tell
 APPLESCRIPT
-    if [ ! -e "$HOME/Desktop/MLX Controller" ]; then
-        ln -sfn "$INSTALL_APP" "$HOME/Desktop/MLX Controller"
+    if [ ! -e "$HOME/Desktop/LLM Controller" ]; then
+        ln -sfn "$INSTALL_APP" "$HOME/Desktop/LLM Controller"
     fi
 }
 
@@ -140,15 +140,15 @@ stop_existing_gui
 
 # 6. Build and install the desktop controller
 if [ -x "$TARGET_DIR/desktop/build_app.sh" ] && command -v swiftc >/dev/null 2>&1; then
-    echo "🖥️  Building MLX Controller…"
+    echo "🖥️  Building LLM Controller…"
     MLX_REPO_PATH="$TARGET_DIR" PYTHON_BIN="$PYTHON_BIN" "$TARGET_DIR/desktop/build_app.sh" --install
 else
-    echo "🖥️  Downloading the prebuilt MLX Controller…"
+    echo "🖥️  Downloading the prebuilt LLM Controller…"
     TMP_DIR="$(mktemp -d)"
     trap 'rm -rf "$TMP_DIR"' EXIT
     URL="https://github.com/cjtsh/mac-mlx-control-center/releases/latest/download/MLXController.app.zip"
     if ! curl -fL --retry 2 -o "$TMP_DIR/MLXController.app.zip" "$URL"; then
-        echo "❌ Could not download MLX Controller from $URL"
+        echo "❌ Could not download LLM Controller from $URL"
         echo "   Install Xcode Command Line Tools (xcode-select --install) and run this installer again."
         exit 1
     fi
@@ -163,7 +163,7 @@ else
 fi
 
 # 7. Launch the controller and wait for the dashboard
-echo "🚀 Starting MLX Controller…"
+echo "🚀 Starting LLM Controller…"
 open "$INSTALL_APP"
 
 for _ in {1..80}; do
@@ -183,8 +183,8 @@ open "http://127.0.0.1:9998"
 
 echo ""
 echo "--------------------------------------------------------"
-echo "🎉 MLX Control Center is running at http://127.0.0.1:9998"
+echo "🎉 LLM Control Center is running at http://127.0.0.1:9998"
 echo "📁 Location: $TARGET_DIR"
 echo "🖥️  Desktop app: $INSTALL_APP"
-echo "💡 Double-click “MLX Controller” on the Desktop anytime."
+echo "💡 Double-click “LLM Controller” on the Desktop anytime."
 echo "--------------------------------------------------------"

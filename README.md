@@ -1,9 +1,9 @@
 
-# ⚡ macOS MLX Control Center `v0.11.14` (MLX + Ollama Edition)
+# ⚡ macOS LLM Control Center `v1.0.0` (MLX + Ollama Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
-Designed specifically for macOS, **macOS MLX Control Center** bridges Apple's high-performance `mlx-lm` (text) and `mlx-vlm` (vision) frameworks with a dark glassmorphic web dashboard and terminal interface. It turns any Mac powered by Apple Silicon M-Series processors into a local AI power-station with zero configuration hassle.
+Designed specifically for macOS, **macOS LLM Control Center** bridges Apple's high-performance `mlx-lm` (text) and `mlx-vlm` (vision) frameworks with a dark glassmorphic web dashboard and terminal interface. It turns any Mac powered by Apple Silicon M-Series processors into a local AI power-station with zero configuration hassle.
 
 ### Dashboard Screenshot
 <img width="3522" height="2344" alt="mlx1" src="https://github.com/user-attachments/assets/1a99830a-f565-41df-bc51-399e7f94e568" />
@@ -24,7 +24,7 @@ Open Terminal and paste this single command:
 ```bash
 curl -sSL https://raw.githubusercontent.com/cjtsh/mac-mlx-control-center/main/install.sh | bash
 ```
-This installs the **MLX Controller** desktop app, starts the dashboard, and puts a controller alias on your Desktop.
+This installs the **LLM Controller** desktop app, starts the dashboard, and puts a controller alias on your Desktop.
 
 ---
 
@@ -53,7 +53,7 @@ Build it yourself with `./desktop/build_app.sh`; `./desktop/build_app.sh --insta
 
 ## 🌟 Why macOS MLX Control Center?
 
-Most local LLM runners are either overly complex, hog system menubars, or require manual hand-editing of configuration JSON files for coding tools. **macOS MLX Control Center** solves this with:
+Most local LLM runners are either overly complex, hog system menubars, or require manual hand-editing of configuration JSON files for coding tools. **macOS LLM Control Center** solves this with:
 
 * 🛡️ **No more silent turns (v0.10.0)**: agent harnesses used to give up on a local model whose server went quiet — `mlx-lm` and `mlx-vlm` write nothing at all while a tool call is being built (one measured turn: **96.8 s** of silence) or during a re-prefill. A built-in stream guard now emits SSE keepalives and a guaranteed `[DONE]` from inside the model server process, so DeepSeek Harness, Pi Coder and friends wait instead of dropping the turn. Port, pid and command line are unchanged.
 * 🖥️ **MLX Controller desktop app (v0.9.0)**: a native window with Start / Stop / Restart / Open Dashboard, live health status, graceful shutdown, port-conflict safety, and no menu-bar icon. Installed to `/Applications` with a Desktop alias; the installer leaves models and the model server on 9999 untouched.
@@ -364,7 +364,7 @@ If DSH still says *"The current model does not support images"*, re-run the sync
 
 ## 💾 Multi-Drive Model Libraries (New in v0.7)
 
-A 70–100 GB model does not have to live on your boot SSD. **macOS MLX Control Center** turns every writable drive into a model library.
+A 70–100 GB model does not have to live on your boot SSD. **macOS LLM Control Center** turns every writable drive into a model library.
 
 ### How it works
 * **Nothing to configure.** Every writable APFS/HFS+ volume with at least 8 GB is discovered from the mount table: your boot drive, internal second SSDs, and any Thunderbolt/USB drive you plug in. Time Machine destinations, read-only DMGs (installers like "Install ChatGPT") and tiny volumes are skipped automatically.
@@ -430,7 +430,7 @@ In the **`⚙️ API Settings`** panel, you can configure your **Max Output Toke
 
 ## 💬 Integrating with LibreChat (Local ChatGPT Web UI with Vision)
 
-The combo of **macOS MLX Control Center** and **[LibreChat](https://github.com/danny-avila/LibreChat)** gives you a completely private, self-hosted ChatGPT-like experience with full multimodal vision support on your Mac.
+The combo of **macOS LLM Control Center** and **[LibreChat](https://github.com/danny-avila/LibreChat)** gives you a completely private, self-hosted ChatGPT-like experience with full multimodal vision support on your Mac.
 
 ### 🌟 Key Benefits:
 * 🔒 **100% Local & Private**: No data leaves your Mac; runs entirely on Apple Silicon GPU & Unified Memory.

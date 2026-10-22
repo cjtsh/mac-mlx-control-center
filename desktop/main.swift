@@ -619,8 +619,8 @@ final class MainViewController: NSViewController {
         icon.widthAnchor.constraint(equalToConstant: 62).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 62).isActive = true
 
-        let title = label("MLX Controller", size: 23, weight: .bold)
-        let subtitle = label("macOS MLX Control Center", size: 12, weight: .regular, color: secondaryText)
+        let title = label("LLM Controller", size: 23, weight: .bold)
+        let subtitle = label("macOS LLM Control Center", size: 12, weight: .regular, color: secondaryText)
         let titleStack = NSStackView(views: [title, subtitle])
         titleStack.orientation = .vertical
         titleStack.alignment = .leading
@@ -868,7 +868,7 @@ final class MainViewController: NSViewController {
         if let owner = server.portOwner(), !server.ownsRunningProcess {
             let alert = NSAlert()
             alert.messageText = "Stop the control center?"
-            alert.informativeText = "The server on port \(server.config.port) was started outside MLX Controller (PID \(owner.pid)). Stopping it will end that process."
+            alert.informativeText = "The server on port \(server.config.port) was started outside LLM Controller (PID \(owner.pid)). Stopping it will end that process."
             alert.alertStyle = .warning
             alert.addButton(withTitle: "Stop Server")
             alert.addButton(withTitle: "Cancel")
@@ -893,7 +893,7 @@ final class MainViewController: NSViewController {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.prompt = "Use Folder"
-        panel.message = "Choose the macOS MLX Control Center folder (the one containing mlx_gui_server.py)."
+        panel.message = "Choose the macOS LLM Control Center folder (the one containing mlx_gui_server.py)."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         guard FileManager.default.fileExists(atPath: url.appendingPathComponent("mlx_gui_server.py").path) else {
             let alert = NSAlert()
@@ -930,7 +930,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "MLX Controller"
+        window.title = "LLM Controller"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = true
@@ -971,7 +971,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func promptForProject() {
         let alert = NSAlert()
-        alert.messageText = "Where is MLX Control Center?"
+        alert.messageText = "Where is LLM Control Center?"
         alert.informativeText = "Choose the folder that contains mlx_gui_server.py. MLX Controller will remember it."
         alert.addButton(withTitle: "Choose Folder…")
         alert.addButton(withTitle: "Later")
@@ -998,7 +998,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appItem = NSMenuItem()
         mainMenu.addItem(appItem)
         let appMenu = NSMenu()
-        let about = NSMenuItem(title: "About MLX Controller", action: #selector(showAbout), keyEquivalent: "")
+        let about = NSMenuItem(title: "About LLM Controller", action: #selector(showAbout), keyEquivalent: "")
         about.target = self
         appMenu.addItem(about)
         appMenu.addItem(.separator())
@@ -1009,8 +1009,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         reveal.target = self
         appMenu.addItem(reveal)
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Hide MLX Controller", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-        appMenu.addItem(withTitle: "Quit MLX Controller", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "Hide LLM Controller", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "Quit LLM Controller", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
 
         let editItem = NSMenuItem()
@@ -1025,8 +1025,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showAbout() {
         let alert = NSAlert()
-        alert.messageText = "MLX Controller"
-        alert.informativeText = "A small desktop controller for the macOS MLX Control Center.\n\nStarts and stops the local server; the dashboard opens in your browser.\n\nVersion 1.0"
+        alert.messageText = "LLM Controller"
+        alert.informativeText = "A small desktop controller for the macOS LLM Control Center.\n\nStarts and stops the local server; the dashboard opens in your browser.\n\nVersion 1.0"
         alert.icon = NSApp.applicationIconImage
         alert.addButton(withTitle: "OK")
         alert.runModal()

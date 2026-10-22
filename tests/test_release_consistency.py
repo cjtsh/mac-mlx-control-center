@@ -72,6 +72,20 @@ check("no MLX-only labels in the shell", not stale, stale)
 # Ollama base URLs already carry /v1; the UI must not append another.
 check("dashboard never appends a second /v1", "/v1' ) + '/v1'" not in html and "+ '/v1/v1'" not in html)
 
+# The label was renamed to LLM in 1.0.0; the identity must not drift with it.
+plist = open(os.path.join(ROOT, "desktop/Info.plist"), encoding="utf-8").read()
+check("bundle id is unchanged by the rename",
+      "com.cjtsh.mlxcontroller" in plist, "com.cjtsh.mlxcontroller")
+check("the app is labelled LLM Controller",
+      "<string>LLM Controller</string>" in plist, "LLM Controller")
+support_dir = "Application Support/MLX Controller"
+main_swift = open(os.path.join(ROOT, "desktop/main.swift"), encoding="utf-8").read()
+install_sh = open(os.path.join(ROOT, "install.sh"), encoding="utf-8").read()
+check("config path is unchanged by the rename",
+      support_dir in main_swift and support_dir in install_sh, support_dir)
+check("the dashboard no longer calls itself MLX-only",
+      "macOS MLX Control Center" not in g.INDEX_HTML, "macOS MLX Control Center")
+
 print()
 if failures:
     print(f"{len(failures)} failure(s): " + ", ".join(failures))
