@@ -378,6 +378,37 @@ def _env_flag(name, default):
     return raw.strip().lower() not in ("0", "false", "no", "off")
 
 
+_PLACEHOLDER_MODELS = {"", "default_model", "default", "local", "mlx-local", "model"}
+
+
+def _repair_model(raw):
+    """Point a placeholder model name at the model this server actually loaded.
+
+    Harnesses send whatever their provider entry says. An entry without a model
+    id falls back to a placeholder like ``default_model``, and mlx-vlm then tries
+    to load a repository with that name, fails with a 401 from Hugging Face, and
+    answers 400 — which looks exactly like "the model never replies". The launch
+    command knows the real id, so the guard fills it in.
+    """
+    target = (os.environ.get("MLX_GUARD_MODEL") or "").strip()
+    if not target or not raw:
+        return raw
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return raw
+    if not isinstance(payload, dict):
+        return raw
+    current = payload.get("model")
+    if isinstance(current, str) and current.strip().lower() not in _PLACEHOLDER_MODELS:
+        return raw
+    payload["model"] = target
+    try:
+        return json.dumps(payload).encode("utf-8")
+    except Exception:
+        return raw
+
+
 def _rename_max_tokens(raw):
     """Copy max_completion_tokens onto max_tokens, which is all mlx-vlm reads.
 
@@ -504,7 +535,7 @@ def _rewriting_receive(scope, receive):
         raw = b"".join(chunks)
         _note_prefix(raw)
         try:
-            fixed = _rename_max_tokens(raw)
+            fixed = _repair_model(_rename_max_tokens(raw))
         except Exception as exc:  # noqa: BLE001
             _note_error("request.body", exc)
             fixed = raw

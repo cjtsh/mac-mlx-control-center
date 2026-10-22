@@ -12,7 +12,9 @@ import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
-import mlx_helper as h  # noqa: E402
+sys.path.insert(0, os.path.join(REPO, "mlx_stream_guard"))
+import mlx_helper as h
+import stream_guard as sg  # noqa: E402
 
 CHECKS = []
 
@@ -385,6 +387,59 @@ def run():
               any("num_parameters=min:13B" in u for u in seen_urls), seen_urls)
     finally:
         h.urllib.request.urlopen = real_urlopen
+
+    # ---- a placeholder model id must never reach the engine ----
+    check("default_model is a placeholder", h.is_placeholder_model("default_model"))
+    check("a real repo id is not", not h.is_placeholder_model("Duckets/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-MLX-4bit"))
+
+    # guard rewrites the placeholder to the model the process serves
+    os.environ["MLX_GUARD_MODEL"] = "Duckets/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-MLX-4bit"
+    try:
+        fixed = sg._repair_model(b'{"model": "default_model", "messages": []}')
+        check("the guard repairs a placeholder model", b"Duckets/NVIDIA" in fixed, fixed)
+        kept = sg._repair_model(b'{"model": "mlx-community/Qwen2.5-1.5B-Instruct-4bit"}')
+        check("the guard leaves a real model alone",
+              b"Qwen2.5-1.5B" in kept and b"Duckets" not in kept, kept)
+        plain = sg._repair_model(b'{"messages": []}')
+        check("the guard fills a missing model", b"Duckets" in plain, plain)
+    finally:
+        os.environ.pop("MLX_GUARD_MODEL", None)
+
+    # sync must write real ids only
+    import tempfile as _tf2
+    home = _tf2.mkdtemp()
+    real_expand = os.path.expanduser
+    real_served = h.served_models
+    real_ol = h.ollama_harness_models
+
+    def fake_expand(p):
+        if p.startswith("~"):
+            return os.path.join(home, p.lstrip("~/"))
+        return real_expand(p)
+
+    try:
+        os.makedirs(os.path.join(home, ".pi/agent"), exist_ok=True)
+        with open(os.path.join(home, ".pi/agent/settings.json"), "w") as f:
+            json.dump({"defaultProvider": "x", "defaultModel": "y"}, f)
+        with open(os.path.join(home, ".pi/agent/models.json"), "w") as f:
+            json.dump({"providers": {}}, f)
+        os.environ["HOME"] = home
+        os.path.expanduser = fake_expand
+        h.served_models = lambda port=9999, host="127.0.0.1", timeout=4.0: [
+            "org/Real-7B", "org/Other-3B"]
+        h.ollama_harness_models = lambda port=None: []
+        h.sync_pi_and_opencode("org/Real-7B", port=9999)
+        written = json.load(open(os.path.join(home, ".pi/agent/models.json")))
+        ids = [m["id"] for m in written["providers"]["MyMac"]["models"]]
+        check("sync writes the real model id only", ids == ["org/Real-7B", "org/Other-3B"], ids)
+        check("no placeholder model is written", "default_model" not in ids, ids)
+        st = json.load(open(os.path.join(home, ".pi/agent/settings.json")))
+        check("Pi's default model is the real id", st.get("defaultModel") == "org/Real-7B", st)
+    finally:
+        os.environ["HOME"] = real_expand("~")
+        os.path.expanduser = real_expand
+        h.served_models = real_served
+        h.ollama_harness_models = real_ol
 
     passed = sum(1 for _, ok, _ in CHECKS if ok)
     print(f"\n{passed}/{len(CHECKS)} checks passed")

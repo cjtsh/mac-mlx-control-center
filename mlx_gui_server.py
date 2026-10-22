@@ -265,11 +265,22 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                         with open(target_path, "r", errors="ignore") as lf:
                             lines = lf.readlines()
                             if hide_polling:
-                                filtered_lines = [l for l in lines if "GET /v1/models" not in l]
+                                # Polling traffic is noise, but a log that is 99%
+                                # GET /v1/models must not look empty: fall back to
+                                # the raw tail and say why.
+                                interesting = [l for l in lines
+                                               if "GET /v1/models" not in l
+                                               and "GET /v1/cache/stats" not in l]
+                                if len(interesting) >= 5:
+                                    content = "".join(interesting[-250:])
+                                elif lines:
+                                    content = ("(no traffic yet beyond polling; "
+                                               "showing the raw tail)\n" + "".join(lines[-250:]))
+                                else:
+                                    content = ""
                             else:
-                                filtered_lines = lines
-                            content = "".join(filtered_lines[-250:])
-                            
+                                content = "".join(lines[-250:])
+
                             full_text = "".join(lines)
                             err_matches = re.findall(r"(Traceback[\s\S]*?(?:ValueError|ModuleNotFoundError|Exception|Error|OSError):[^\n]+)", full_text)
                             if err_matches:
@@ -489,7 +500,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
 
             # Keeps the harness's stream alive through a silent prefill or a long
             # tool call, and guarantees a terminal `data: [DONE]` event.
-            env = mlx_helper.stream_guard_env(env)
+            env = mlx_helper.stream_guard_env(env, model=launch_target)
 
             # Reuse the KV of the prefix a turn shares with the previous one. Without
             # it every turn re-prefills the entire conversation (a 63k-token prompt
@@ -928,7 +939,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
 
 # One source of truth for the release: the title, the badge and the banner all
 # read this, so they can no longer drift apart (v0.11.6 shipped a stale badge).
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 
 INDEX_HTML = """<!DOCTYPE html>
 <html lang="en">

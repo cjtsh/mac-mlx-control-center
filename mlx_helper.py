@@ -387,7 +387,7 @@ STREAM_GUARD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mlx
 STREAM_GUARD_STATE = os.path.expanduser("~/.mlx_pids/stream_guard.json")
 STREAM_GUARD_LOG = os.path.expanduser("~/.mlx_logs/stream_guard.log")
 
-def stream_guard_env(env=None):
+def stream_guard_env(env=None, model=""):
     """Make the launched model server import `mlx_stream_guard/sitecustomize.py`.
 
     The guard has to live *inside* the server process: proxying would mean a second
@@ -410,6 +410,10 @@ def stream_guard_env(env=None):
     env["PYTHONPATH"] = os.pathsep.join(parts)
     env["MLX_STREAM_GUARD"] = "1"
     env.setdefault("MLX_GUARD_KEEPALIVE_SECS", "5")
+    # A harness whose provider entry has no model id sends a placeholder like
+    # "default_model"; the guard rewrites it to the model this process serves.
+    if model:
+        env["MLX_GUARD_MODEL"] = str(model)
     env["MLX_GUARD_LOG"] = env.get("MLX_GUARD_LOG") or STREAM_GUARD_LOG
     env["MLX_GUARD_STATE"] = env.get("MLX_GUARD_STATE") or STREAM_GUARD_STATE
     return env
@@ -2616,6 +2620,24 @@ def sync_ollama_agents(port=None, patch_path=None):
         out["dsh"] = {"ok": False, "error": str(exc)}
     return out
 
+PLACEHOLDER_MODEL_IDS = {"", "default_model", "default", "local", "model"}
+
+
+def is_placeholder_model(name):
+    return str(name or "").strip().lower() in PLACEHOLDER_MODEL_IDS
+
+
+def served_models(port=9999, host="127.0.0.1", timeout=4.0):
+    """The model ids an engine on this port actually answers to."""
+    try:
+        url = f"http://{host}:{int(port)}/v1/models"
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return [m.get("id") for m in (data.get("data") or []) if m.get("id")]
+    except Exception:
+        return []
+
+
 def sync_pi_and_opencode(active_model, port=9999, is_vision=False):
     """Automatically updates Pi Code and OpenCode configurations to auto-detect the active MLX model under provider 'MyMac'."""
     try:
@@ -2626,7 +2648,9 @@ def sync_pi_and_opencode(active_model, port=9999, is_vision=False):
                 with open(pi_settings_file, "r") as f:
                     st = json.load(f)
                 st["defaultProvider"] = "MyMac"
-                st["defaultModel"] = "default_model"
+                # A placeholder here makes the harness send "default_model" to the
+                # engine, which then tries to load a repo by that name and 400s.
+                st["defaultModel"] = active_model
                 with open(pi_settings_file, "w") as f:
                     json.dump(st, f, indent=2)
             except Exception:
@@ -2653,6 +2677,22 @@ def sync_pi_and_opencode(active_model, port=9999, is_vision=False):
                 except Exception:
                     configured = 0
                 model_budget = output_token_budget(active_model, configured)
+                # One entry per model the server actually serves, by real id. No
+                # "default_model" alias: it is not a model, and the engine will try
+                # to load it as a repository.
+                ids = [active_model] + [m for m in served_models(port) if m != active_model]
+                ids = [i for i in dict.fromkeys(ids) if i and not is_placeholder_model(i)]
+                entries = []
+                for rid in ids:
+                    entries.append({
+                        "id": rid,
+                        "name": f"{rid} (Local)",
+                        "reasoning": True,
+                        "input": inputs,
+                        "contextWindow": model_ctx,
+                        "maxTokens": model_budget,
+                        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
+                    })
                 md["providers"]["MyMac"] = {
                     "baseUrl": f"http://127.0.0.1:{port}/v1",
                     "api": "openai-completions",
@@ -2662,26 +2702,7 @@ def sync_pi_and_opencode(active_model, port=9999, is_vision=False):
                         "supportsDeveloperRole": False,
                         "supportsReasoningEffort": False
                     },
-                    "models": [
-                        {
-                            "id": "default_model",
-                            "name": f"⚡ Active MLX Model ({'Vision' if is_vision else 'Text'} Auto-Detect)",
-                            "reasoning": True,
-                            "input": inputs,
-                            "contextWindow": model_ctx,
-                            "maxTokens": model_budget,
-                            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
-                        },
-                        {
-                            "id": active_model,
-                            "name": f"{active_model} (Local)",
-                            "reasoning": True,
-                            "input": inputs,
-                            "contextWindow": model_ctx,
-                            "maxTokens": model_budget,
-                            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
-                        }
-                    ]
+                    "models": entries,
                 }
                 try:
                     ol_models = ollama_harness_models()
@@ -2727,7 +2748,7 @@ def sync_pi_and_opencode(active_model, port=9999, is_vision=False):
                 try:
                     with open(opf, "r") as f:
                         opd = json.load(f)
-                    opd["model"] = "MyMac/default_model"
+                    opd["model"] = f"MyMac/{active_model}"
                     if "provider" not in opd:
                         opd["provider"] = {}
                     
@@ -4307,8 +4328,21 @@ def openai_target(base_url="", host="127.0.0.1", port=9999, model=""):
             base += "/v1"
         url = base + "/chat/completions"
     else:
-        url = f"http://{host}:{port}/v1/chat/completions"
-    return url, ((model or "").strip() or "default_model")
+        base = f"http://{host}:{port}/v1"
+        url = base + "/chat/completions"
+    name = (model or "").strip()
+    if not name or name.lower() in ("default_model", "default"):
+        # Ask the engine which model this endpoint serves. Guessing a name makes
+        # mlx-vlm try to load a repo called "default_model" and answer 400.
+        try:
+            with urllib.request.urlopen(base + "/models", timeout=8) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            served = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
+            if served:
+                name = served[0]
+        except Exception:
+            pass
+    return url, name
 
 def run_model_benchmark(prompt, model, port=9999, host="127.0.0.1", base_url=""):
     """Benchmark any OpenAI-compatible endpoint — MLX servers and Ollama alike."""
@@ -4374,8 +4408,14 @@ if __name__ == "__main__":
     elif cmd == "system_stats":
         print(json.dumps(get_system_stats()))
     elif cmd == "sync_configs":
-        mname = sys.argv[2] if len(sys.argv) > 2 else "default_model"
-        sync_pi_and_opencode(mname)
+        mname = sys.argv[2] if len(sys.argv) > 2 else ""
+        if not mname or is_placeholder_model(mname):
+            served = served_models()
+            mname = served[0] if served else ""
+        if mname:
+            sync_pi_and_opencode(mname)
+        else:
+            print("No model id given and no server is answering on 9999; nothing synced.")
         print(f"Synced configs for {mname}")
     elif cmd == "search_hf":
         q = sys.argv[2] if len(sys.argv) > 2 else "mlx"

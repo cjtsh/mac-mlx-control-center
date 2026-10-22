@@ -19,10 +19,29 @@ def check(name, ok, detail=""):
 
 
 def main():
-    # MLX: no base URL, default port, the server ignores the model name
-    url, model = h.openai_target("", port=9999, model="")
-    check("MLX default target", url == "http://127.0.0.1:9999/v1/chat/completions", url)
-    check("MLX default model id", model == "default_model", model)
+    # MLX: no base URL, no model given -> ask the engine what it serves. Guessing
+    # "default_model" makes mlx-vlm try to load a repo by that name and answer 400.
+    import json as _json
+    real_urlopen = h.urllib.request.urlopen
+
+    class _Resp:
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def read(self):
+            return _json.dumps({"data": [{"id": "org/Served-7B"}]}).encode()
+
+    try:
+        h.urllib.request.urlopen = lambda req, timeout=None: _Resp()
+        url, model = h.openai_target("", port=9999, model="")
+        check("MLX default target", url == "http://127.0.0.1:9999/v1/chat/completions", url)
+        check("an empty model resolves to what the server serves", model == "org/Served-7B", model)
+
+        url, model = h.openai_target("", port=9999, model="default_model")
+        check("a placeholder model is replaced the same way", model == "org/Served-7B", model)
+    finally:
+        h.urllib.request.urlopen = real_urlopen
 
     # Ollama: a base URL plus the exact tag (tags have no '/')
     url, model = h.openai_target("http://127.0.0.1:11434/v1/",
