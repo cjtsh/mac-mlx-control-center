@@ -108,6 +108,25 @@ def run():
         check("sizes convert to GB", files[0]["size_gb"] == 4.0, files[0])
         check("quant detected in listing", [f["quant"] for f in files] == ["4-bit", "8-bit"], files)
 
+        # ---- GGUFs that ship no chat template get the family's real one ----
+        check("qwen2 template bundled", "if .Messages" in h.ollama_chat_template_for("qwen2"))
+        check("family lookup normalises dots", h.ollama_chat_template_for("qwen2.5") ==
+              h.ollama_chat_template_for("qwen2"))
+        check("unknown family gets no template", h.ollama_chat_template_for("llama") == "")
+        real_run = h.subprocess.run
+
+        class _Run:
+            def __init__(self, out, rc=0):
+                self.stdout, self.stderr, self.returncode = out, "", rc
+
+        try:
+            h.subprocess.run = lambda *a, **k: _Run("FROM foo\nTEMPLATE {{ .Prompt }}\n")
+            check("raw passthrough detected", h.ollama_has_chat_template("x") is False)
+            h.subprocess.run = lambda *a, **k: _Run('TEMPLATE """{{ .Messages }}"""\n')
+            check("real template detected", h.ollama_has_chat_template("x") is True)
+        finally:
+            h.subprocess.run = real_run
+
         # ---- the free-space guard counts the selected quant, not the repo --
         h._REPO_SIZE_CACHE.clear()
         real_urlopen = h.urllib.request.urlopen

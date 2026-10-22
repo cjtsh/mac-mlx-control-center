@@ -838,6 +838,96 @@ def ollama_model_tag(path_or_name):
     base = re.sub(r"[^a-z0-9._-]+", "-", base).strip("-.")
     return (base or "local-model") + ":latest"
 
+# A GGUF converted without its tokenizer config has no chat template, and Ollama
+# then falls back to a raw "{{ .Prompt }}" passthrough: no <|im_start|> tokens, no
+# tool calling, and answers that look like a text-completion demo. Re-create the
+# model with the family's real template when that happens.
+CHAT_TEMPLATES = {
+    "qwen2": r'''{{- if .Messages }}
+{{- if or .System .Tools }}<|im_start|>system
+{{- if .System }}
+{{ .System }}
+{{- end }}
+{{- if .Tools }}
+
+# Tools
+
+You may call one or more functions to assist with the user query.
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+{{- range .Tools }}
+{"type": "function", "function": {{ .Function }}}
+{{- end }}
+</tools>
+
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+<tool_call>
+{"name": <function-name>, "arguments": <args-json-object>}
+</tool_call>
+{{- end }}<|im_end|>
+{{ end }}
+{{- range $i, $_ := .Messages }}
+{{- $last := eq (len (slice $.Messages $i)) 1 -}}
+{{- if eq .Role "user" }}<|im_start|>user
+{{ .Content }}<|im_end|>
+{{ else if eq .Role "assistant" }}<|im_start|>assistant
+{{ if .Content }}{{ .Content }}
+{{- else if .ToolCalls }}<tool_call>
+{{ range .ToolCalls }}{"name": "{{ .Function.Name }}", "arguments": {{ .Function.Arguments }}}
+{{ end }}</tool_call>
+{{- end }}{{ if not $last }}<|im_end|>
+{{ end }}
+{{- else if eq .Role "tool" }}<|im_start|>user
+<tool_response>
+{{ .Content }}
+</tool_response><|im_end|>
+{{ end }}
+{{- if and (ne .Role "assistant") $last }}<|im_start|>assistant
+{{ end }}
+{{- end }}
+{{- else }}
+{{- if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ if .Prompt }}<|im_start|>user
+{{ .Prompt }}<|im_end|>
+{{ end }}<|im_start|>assistant
+{{ end }}{{ .Response }}{{ if .Response }}<|im_end|>{{ end }}''',
+}
+
+
+def ollama_has_chat_template(tag, port=None):
+    """True when the model's TEMPLATE is a real chat template, not a passthrough."""
+    exe = ollama_bin()
+    if not exe:
+        return None
+    env = dict(os.environ)
+    env["OLLAMA_HOST"] = f"{OLLAMA_DEFAULT_HOST}:{int(port or ollama_settings()['port'])}"
+    try:
+        out = subprocess.run([exe, "show", "--modelfile", tag], capture_output=True,
+                             text=True, env=env, timeout=20)
+    except Exception:
+        return None
+    if out.returncode != 0:
+        return None
+    for line in (out.stdout or "").splitlines():
+        if line.startswith("TEMPLATE"):
+            body = line[len("TEMPLATE"):].strip()
+            return bool(body) and body not in ("{{ .Prompt }}", "{{.Prompt}}")
+    return False
+
+def ollama_chat_template_for(family):
+    """Go template for a GGUF family, used only when the file carries none.
+
+    Ollama's TEMPLATE is a Go template, not Jinja: the Hugging Face chat_template
+    from tokenizer_config.json fails with "malformed character constant".
+    """
+    fam = (family or "").lower().replace("-", "").replace("_", "").replace(".", "")
+    for key, tmpl in CHAT_TEMPLATES.items():
+        if key in fam:
+            return tmpl
+    return ""
+
 def ollama_import(gguf_path, name=None, port=None, wait_seconds=180):
     """Create an Ollama model from a local GGUF file.
 
@@ -873,7 +963,35 @@ def ollama_import(gguf_path, name=None, port=None, wait_seconds=180):
         shutil.rmtree(tmpdir, ignore_errors=True)
     if out.returncode != 0:
         return {"ok": False, "error": (out.stderr or out.stdout or "ollama create failed").strip()[:400]}
+
+    # No template in the GGUF? Put the family's real chat template back, or the
+    # model answers as a raw completion and no harness can call tools on it.
+    template_fixed = False
+    if ollama_has_chat_template(tag, port) is False:
+        try:
+            info = _ollama_http("/api/show", port=port, payload={"model": tag}, timeout=20) or {}
+            family = (info.get("details") or {}).get("family", "")
+        except Exception:
+            family = ""
+        tmpl = ollama_chat_template_for(family)
+        if tmpl:
+            tmpdir = tempfile.mkdtemp(prefix="ollama_template_")
+            mf = os.path.join(tmpdir, "Modelfile")
+            try:
+                with open(mf, "w") as fh:
+                    fh.write(modelfile + 'TEMPLATE """' + tmpl + '"""\n')
+                fixed = subprocess.run([exe, "create", tag, "-f", mf], text=True,
+                                       capture_output=True, env=env, timeout=wait_seconds)
+                template_fixed = fixed.returncode == 0
+                if not template_fixed:
+                    _write_log_line("ollama template fix failed: " + (fixed.stderr or "")[:300])
+            except Exception:
+                template_fixed = False
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
     return {"ok": True, "tag": tag, "message": f"Imported as {tag}",
+            "template_fixed": template_fixed,
             "output": (out.stdout or "").strip()[-400:]}
 
 def local_gguf_files(model_dir):
