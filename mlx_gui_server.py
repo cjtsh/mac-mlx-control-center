@@ -904,7 +904,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.11.6 (MLX + Ollama)</title>
+  <title>macOS MLX Control Center v0.11.7 (MLX + Ollama)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -2979,8 +2979,14 @@ INDEX_HTML = """<!DOCTYPE html>
           const memEl = document.getElementById('htopMlxMeta');
           if (stats.active_models) {
             const names = loadedOllama.map(m => m.id).filter(Boolean);
-            memEl.innerText = stats.active_models + ' model(s) loaded · ' + memParts.join(' · ');
-            memEl.title = names.length ? ('Loaded: ' + names.join(', ')) : '';
+            let extra = '';
+            if (stats.ollama_reported_gb && stats.ollama_ram_gb && stats.ollama_reported_gb > stats.ollama_ram_gb + 0.5) {
+              extra = ' (Ollama reserves ' + stats.ollama_reported_gb + ' GB)';
+            }
+            memEl.innerText = stats.active_models + ' model(s) loaded · ' + memParts.join(' · ') + extra;
+            memEl.title = (names.length ? ('Loaded: ' + names.join(', ') + String.fromCharCode(10)) : '')
+              + 'Resident memory (RSS) of the processes holding models. Model weights that are memory-mapped also count as file cache, so this can be larger than the "Used" figure in Mac System RAM.';
+            memEl.style.color = '';
           } else {
             memEl.innerText = 'No model loaded';
             memEl.title = 'Start an MLX model, or send a prompt to an Ollama tag';
@@ -3345,7 +3351,8 @@ INDEX_HTML = """<!DOCTYPE html>
         const loaded = o.loaded || [];
         const loadedIds = loaded.map(l => l.id);
         const loadedLine = loaded.length
-          ? `<div style="font-size:12px; margin-bottom:6px; color:#34d399;">🟢 In memory now: ${loaded.map(l => `${l.id} (${(l.vram_gb || l.size_gb)} GB${l.context ? ', ' + Math.round(l.context / 1024) + 'K ctx' : ''})`).join(' · ')}</div>`
+          ? `<div style="font-size:12px; margin-bottom:6px; color:#34d399;">🟢 In memory now: ${loaded.map(l => `${l.id} (${(l.vram_gb || l.size_gb)} GB allocated${l.context ? ', ' + Math.round(l.context / 1024) + 'K ctx' : ''})`).join(' · ')}</div>
+             <div style="font-size:11px; margin-bottom:6px; color:#6b7280;">"Allocated" is what the engine reserves (weights + full KV cache); the resident figure is in the Model Memory card above.</div>`
           : `<div style="font-size:12px; margin-bottom:6px; color:${running ? '#9ca3af' : '#6b7280'};">${running ? '⚪ Nothing loaded in memory — the first prompt loads the model (from the store path above).' : '⚪ Engine not running — no model can be loaded.'}</div>`;
         const rows = (o.models || []).map(m => `
           <tr>

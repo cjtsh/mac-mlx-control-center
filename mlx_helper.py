@@ -654,6 +654,33 @@ def ollama_pid(port=None):
     except Exception:
         return None
 
+def ollama_runner_rss_gb():
+    """Resident memory of the engine's runner processes, in GB.
+
+    Ollama reports `size`/`size_vram` as allocated capacity (weights + the whole
+    KV reservation), which can exceed what the machine is actually holding. The
+    dashboard's other numbers are resident sizes, so this keeps them comparable.
+    """
+    try:
+        out = subprocess.check_output(["ps", "-Ao", "rss,args"], text=True)
+    except Exception:
+        return 0.0
+    total_kb = 0
+    for line in out.splitlines()[1:]:
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        args = parts[1]
+        if "ollama" not in args:
+            continue
+        if "runner" not in args and "llama-server" not in args:
+            continue
+        try:
+            total_kb += int(parts[0])
+        except ValueError:
+            continue
+    return round(total_kb / (1024**2), 2)
+
 def ollama_ps(port=None, timeout=2.0):
     """Models the Ollama engine currently holds in memory (`/api/ps`).
 
@@ -3506,7 +3533,10 @@ def get_system_stats():
         ollama_loaded = ollama_ps()
     except Exception:
         ollama_loaded = []
-    ollama_model_ram = sum(m["vram_gb"] or m["size_gb"] for m in ollama_loaded)
+    ollama_reported = sum(m["vram_gb"] or m["size_gb"] for m in ollama_loaded)
+    ollama_resident = ollama_runner_rss_gb() if ollama_loaded else 0.0
+    # Prefer the resident figure so it is comparable with "Mac System RAM".
+    ollama_model_ram = ollama_resident or ollama_reported
 
     return {
         "total_ram_gb": round(total_ram / (1024**3), 1),
@@ -3520,6 +3550,7 @@ def get_system_stats():
         "ram_percent": round((used_ram / total_ram) * 100, 1) if total_ram else 0,
         "mlx_ram_gb": round(mlx_ram / (1024**3), 2),
         "ollama_ram_gb": round(ollama_model_ram, 2),
+        "ollama_reported_gb": round(ollama_reported, 2),
         "model_ram_gb": round(mlx_ram / (1024**3) + ollama_model_ram, 2),
         "cpu_percent": cpu_percent,
         "active_models": len(servers) + len(ollama_loaded),
@@ -4107,9 +4138,12 @@ def openai_target(base_url="", host="127.0.0.1", port=9999, model=""):
     daemon for many models, so the id has to be the exact tag. Keeping this rule
     in one place is what makes the test panel engine-agnostic.
     """
-    base = (base_url or "").strip()
+    base = (base_url or "").strip().rstrip("/")
     if base:
-        url = base.rstrip("/") + "/chat/completions"
+        # Callers may pass "http://host:port/v1" or just "http://host:port".
+        if not base.endswith("/v1"):
+            base += "/v1"
+        url = base + "/chat/completions"
     else:
         url = f"http://{host}:{port}/v1/chat/completions"
     return url, ((model or "").strip() or "default_model")

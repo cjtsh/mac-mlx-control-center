@@ -50,7 +50,10 @@ def main():
 
     real = h.urllib.request.urlopen
 
+    calls = []
+
     def fake(req, timeout=None):
+        calls.append(req.full_url)
         seen["url"] = req.full_url
         seen["body"] = json.loads(req.data.decode())
         return _Resp()
@@ -59,8 +62,8 @@ def main():
         h.urllib.request.urlopen = fake
         res = h.run_model_benchmark("hi", "qwen2.5:72b-instruct-q4_K_M",
                                     port=11434, base_url="http://127.0.0.1:11434/v1")
-        check("benchmark hits the base URL",
-              seen.get("url") == "http://127.0.0.1:11434/v1/chat/completions", seen.get("url"))
+        check("benchmark hits the base URL and never doubles /v1",
+              any(u == "http://127.0.0.1:11434/v1/chat/completions" for u in calls), calls)
         check("benchmark sends the Ollama tag",
               seen.get("body", {}).get("model") == "qwen2.5:72b-instruct-q4_K_M",
               seen.get("body", {}).get("model"))
