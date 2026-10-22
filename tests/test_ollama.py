@@ -260,9 +260,10 @@ def run():
         real_http = h._ollama_http
         try:
             def fake_run(path, port=None, timeout=None, payload=None):
-                seen["path"] = path
-                seen["payload"] = payload
-                return {}
+                if path == "/api/generate":
+                    seen["path"] = path
+                    seen["payload"] = payload
+                return {} if path == "/api/generate" else {"models": []}
             h._ollama_http = fake_run
             res = h.ollama_run("qwen2.5:72b-instruct-q4_K_M", keep_alive="30m")
             check("run posts to /api/generate", seen.get("path") == "/api/generate", seen)
