@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, json, tempfile, hashlib, signal, shlex, subprocess, re, shutil, urllib.request, urllib.parse, urllib.error, socket, time, threading
+import os, sys, json, fnmatch, tempfile, hashlib, signal, shlex, subprocess, re, shutil, urllib.request, urllib.parse, urllib.error, socket, time, threading
 
 _REPO_SIZE_CACHE = {}
 _SPEED_CACHE = {}
@@ -29,6 +29,7 @@ def load_global_settings():
         "default_max_tokens": 0,  # 0 = derive from the loaded model's context window
         "auto_sync_agents": True,
         "turbo_downloads": True,
+        "xet_downloads": False,
         "prefix_cache": True,          # reuse the KV of a prompt prefix shared by two turns
         "prefix_cache_blocks": 4096,   # 16 tokens per block -> 65,536 reusable tokens
         "prefix_cache_disk_gb": 20,    # warm-disk tier that survives a restart
@@ -358,7 +359,19 @@ def get_mlx_env():
     env["PYTHONUNBUFFERED"] = "1"
     # huggingface_hub >= 1.0 downloads through Xet; hf_transfer is gone.
     env.pop("HF_HUB_ENABLE_HF_TRANSFER", None)
-    env["HF_XET_HIGH_PERFORMANCE"] = "1"
+    # Xet can stall at 0 bytes on a large single-file blob (seen on a 44 GB GGUF:
+    # four minutes with an empty .incomplete file), while plain HTTP resume runs at
+    # 45 MB/s. Off by default; set xet_downloads in settings.json to re-enable.
+    try:
+        xet_on = bool(load_global_settings().get("xet_downloads", False))
+    except Exception:
+        xet_on = False
+    if xet_on:
+        env["HF_XET_HIGH_PERFORMANCE"] = "1"
+        env.pop("HF_HUB_DISABLE_XET", None)
+    else:
+        env.pop("HF_XET_HIGH_PERFORMANCE", None)
+        env["HF_HUB_DISABLE_XET"] = "1"
     env["HF_HUB_DOWNLOAD_TIMEOUT"] = "30"
     env["HF_HUB_ETAG_TIMEOUT"] = "20"
     # User's own credentials, never baked into the repo.
@@ -1844,8 +1857,19 @@ def hf_repo_gguf_files(repo_id, revision="main", timeout=12):
     out.sort(key=lambda f: (f["size_gb"], f["path"]))
     return out
 
-def get_repo_files_size(repo_id, subfolder=""):
-    cache_key = f"{repo_id}:{subfolder}" if subfolder else repo_id
+def get_repo_files_size(repo_id, subfolder="", include=None):
+    """Total bytes of the files a download will actually fetch.
+
+    A GGUF repo can hold twenty quants of one model; without `include` this adds up
+    every quant in the repo and the free-space guard then refuses a 44 GB download
+    because the repo's other quants need 700 GB.
+    """
+    patterns = [str(p) for p in (include or []) if str(p).strip()]
+    cache_key = f"{repo_id}:{subfolder}"
+    if patterns:
+        cache_key += ":include=" + "|".join(patterns)
+    if not patterns and not subfolder:
+        cache_key = repo_id
     if cache_key in _REPO_SIZE_CACHE:
         return _REPO_SIZE_CACHE[cache_key]
     try:
@@ -1859,11 +1883,11 @@ def get_repo_files_size(repo_id, subfolder=""):
                 if isinstance(f, dict) and "size" in f:
                     path = f.get("path", "")
                     sz = f.get("size", 0)
-                    if subfolder:
-                        if path.startswith(sf_prefix) or path == subfolder:
-                            total += sz
-                    else:
-                        total += sz
+                    if subfolder and not (path.startswith(sf_prefix) or path == subfolder):
+                        continue
+                    if patterns and not any(fnmatch.fnmatch(path, pat) for pat in patterns):
+                        continue
+                    total += sz
             if total > 0:
                 _REPO_SIZE_CACHE[cache_key] = total
                 return total

@@ -108,6 +108,20 @@ def run():
         check("sizes convert to GB", files[0]["size_gb"] == 4.0, files[0])
         check("quant detected in listing", [f["quant"] for f in files] == ["4-bit", "8-bit"], files)
 
+        # ---- the free-space guard counts the selected quant, not the repo --
+        h._REPO_SIZE_CACHE.clear()
+        real_urlopen = h.urllib.request.urlopen
+        h.urllib.request.urlopen = lambda *a, **k: _Resp(json.dumps(payload).encode())
+        try:
+            whole = h.get_repo_files_size("org/repo")
+            one = h.get_repo_files_size("org/repo", include=["model-Q4_K_M.gguf"])
+            other = h.get_repo_files_size("org/repo", include=["nomatch/*"])
+        finally:
+            h.urllib.request.urlopen = real_urlopen
+        check("whole-repo size sums every file", whole == 12 * 1024 ** 3 + 100, whole)
+        check("include narrows the free-space guard", one == 4 * 1024 ** 3, one)
+        check("include with no match is zero, not the repo", other == 0, other)
+
         # ---- DSH gets a second provider, and MLX is left alone -------------
         res = h.sync_dsh_ollama(patch_path=patch)
         check("provider inserted", res.get("ok") and res.get("action") == "inserted", res)

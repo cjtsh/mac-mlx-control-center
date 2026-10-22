@@ -726,7 +726,8 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             # Free-space guard: refuse to start a download that cannot fit.
             needed_gb = 0.0
             try:
-                total_bytes = mlx_helper.get_repo_files_size(repo_id, subfolder=subfolder)
+                total_bytes = mlx_helper.get_repo_files_size(repo_id, subfolder=subfolder,
+                                                             include=include_patterns)
                 if total_bytes:
                     needed_gb = round((total_bytes / (1024 ** 3)) * 1.1, 1)
             except Exception:
@@ -865,7 +866,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.11.0 (MLX + Ollama)</title>
+  <title>macOS MLX Control Center v0.11.1 (MLX + Ollama)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1306,7 +1307,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.11.0 (MLX + Ollama)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.11.1 (MLX + Ollama)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
