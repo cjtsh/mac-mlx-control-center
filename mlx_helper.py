@@ -681,6 +681,27 @@ def ollama_runner_rss_gb():
             continue
     return round(total_kb / (1024**2), 2)
 
+def ollama_run(tag, port=None, keep_alive="30m", timeout=900):
+    """Load a model into the engine's memory (Ollama's equivalent of Start Model).
+
+    Uses /api/generate with an empty prompt: the engine loads the weights and
+    returns, no tokens are produced. keep_alive then decides how long it stays.
+    """
+    if not tag:
+        return {"ok": False, "error": "no model tag given"}
+    try:
+        data = _ollama_http("/api/generate", port=port, timeout=timeout,
+                            payload={"model": tag, "prompt": "", "stream": False,
+                                     "keep_alive": keep_alive or "30m"}) or {}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    if not isinstance(data, dict) or data.get("error"):
+        return {"ok": False, "error": (data or {}).get("error") or "engine did not load the model"}
+    loaded = ollama_ps(port=port)
+    mine = next((m for m in loaded if m["id"] == tag or m["id"].split(":")[0] == tag), None)
+    return {"ok": True, "tag": tag, "keep_alive": keep_alive or "30m",
+            "loaded": bool(mine), "size_gb": (mine or {}).get("size_gb", 0)}
+
 def ollama_ps(port=None, timeout=2.0):
     """Models the Ollama engine currently holds in memory (`/api/ps`).
 

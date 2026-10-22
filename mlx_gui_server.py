@@ -540,6 +540,11 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
             self.send_json(result)
+        elif path == "/api/ollama/run":
+            tag = (payload.get("model") or payload.get("tag") or "").strip()
+            keep = (payload.get("keep_alive") or "30m").strip()
+            result = mlx_helper.ollama_run(tag, keep_alive=keep)
+            self.send_json(result)
         elif path == "/api/stop":
             pid = payload.get("pid")
             port = payload.get("port")
@@ -904,7 +909,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.11.7 (MLX + Ollama)</title>
+  <title>macOS MLX Control Center v0.11.8 (MLX + Ollama)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -3107,6 +3112,8 @@ INDEX_HTML = """<!DOCTYPE html>
           serverContainer.innerHTML = `<div class="card" style="grid-column: 1 / -1; width: 100%; text-align: center; color: var(--text-muted); padding: 18px;">No model currently running. Click "Start Model" on any downloaded model below!</div>`;
         }
 
+        window._ollamaLoaded = olLoaded.map(l => l.id);
+
         // A loaded Ollama model is just as "running" as an MLX server: show it.
         if (olLoaded.length) {
           if (/No model currently running/.test(serverContainer.innerHTML)) serverContainer.innerHTML = '';
@@ -3256,17 +3263,21 @@ INDEX_HTML = """<!DOCTYPE html>
         let badgeColor = m.is_vision ? '#a855f7' : (m.supported ? '#6366f1' : '#f59e0b');
         const tagBadge = m.arch_tag ? `<span style="font-size:11px; padding: 2px 8px; border-radius: 12px; background: rgba(255,255,255,0.08); color: ${badgeColor}; margin-left: 6px;">${m.arch_tag}</span>` : '';
         const visionBadge = m.is_vision ? `<span class="ram-badge fit" style="background: rgba(168, 85, 247, 0.2); color: #d8b4fe; border-color: rgba(168, 85, 247, 0.4);">👁️ Vision Ready</span>` : '';
+        const inOllamaBadge = m.in_ollama ? `<span class="ram-badge fit" style="background: rgba(52, 211, 153, 0.18); color: #6ee7b7; border-color: rgba(52, 211, 153, 0.4);" title="Already imported: ${m.ollama_tag}">✅ In Ollama</span>` : '';
         const ramBadge = getRamBadge(m.size_gb ? (m.size_gb * 1.08 + 2.0) : 0, currentUsableRam, true);
         const isChecked = selectedForCompare.has(m.name) ? 'checked' : '';
         const hfUrl = m.base_name ? `https://huggingface.co/${m.base_name}${m.subfolder ? '/tree/main/' + m.subfolder : ''}` : `https://huggingface.co/${m.name}`;
         // MLX models start a server; a GGUF has to be handed to Ollama first.
-        const primaryAction = m.ollama
-          ? `<button class="btn btn-secondary" onclick="openOllamaModal()">🦙 Managed by Ollama</button>`
-          : (m.in_ollama
-              ? `<button class="btn btn-secondary" style="border-color: rgba(52,211,153,0.5); color: #34d399;" onclick="openOllamaModal()">✅ In Ollama as ${m.ollama_tag}</button>`
-              : (m.engine === 'ollama' || /\\.gguf$/i.test(m.name)
-                  ? `<button class="btn btn-primary" onclick='importGguf(${JSON.stringify(m.gguf_path || m.path || '')}, ${JSON.stringify(m.name)})'>🦙 Import to Ollama</button>`
-                  : `<button class="btn ${isRunning ? 'btn-secondary' : 'btn-primary'}" onclick="openLaunchModal('${m.name}')">${isRunning ? `✓ Active on Port ${runningServer.port}` : '🚀 Start Model'}</button>`));
+        // A tag in the Ollama store and an imported GGUF are both "in Ollama":
+        // they start the same way, by loading the tag into the engine.
+        const ollamaTag = m.ollama ? m.name : (m.in_ollama ? m.ollama_tag : '');
+        const ollamaLoaded = ollamaTag && (window._ollamaLoaded || []).includes(ollamaTag);
+        const primaryAction = ollamaTag
+          ? `<button class="btn ${ollamaLoaded ? 'btn-secondary' : 'btn-primary'}" onclick='runOllamaModel(${JSON.stringify(ollamaTag)})'>${ollamaLoaded ? '✓ Loaded' : '🚀 Start Model'}</button>
+             <button class="btn btn-secondary" onclick="openOllamaModal()">🦙 Manage</button>`
+          : (m.engine === 'ollama' || /\\.gguf$/i.test(m.name)
+              ? `<button class="btn btn-primary" onclick='importGguf(${JSON.stringify(m.gguf_path || m.path || '')}, ${JSON.stringify(m.name)})'>🦙 Import to Ollama</button>`
+              : `<button class="btn ${isRunning ? 'btn-secondary' : 'btn-primary'}" onclick="openLaunchModal('${m.name}')">${isRunning ? `✓ Active on Port ${runningServer.port}` : '🚀 Start Model'}</button>`);
 
         const fastSwapCard = `
           <div class="card">
@@ -3275,6 +3286,7 @@ INDEX_HTML = """<!DOCTYPE html>
                 <div class="card-title">${m.name} ${tagBadge}</div>
                 <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
                   ${visionBadge}
+                  ${inOllamaBadge}
                   ${ramBadge}
                 </div>
                 <label class="compare-label" style="font-size: 11px; cursor: pointer; color: var(--text-muted); display: inline-flex; align-items: center; gap: 4px; margin-left: 6px;">
@@ -3444,6 +3456,21 @@ INDEX_HTML = """<!DOCTYPE html>
       } catch (e) {
         alert('Download failed: ' + e);
       }
+    }
+
+    async function runOllamaModel(tag) {
+      try {
+        const res = await fetch('/api/ollama/run', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: tag })
+        });
+        const d = await res.json();
+        if (!d.ok) alert('Could not load ' + tag + ': ' + (d.error || 'unknown error'));
+      } catch (e) {
+        alert('Ollama request failed: ' + e);
+      }
+      await loadStatus();
+      await loadModels();
     }
 
     async function importGguf(path, name) {

@@ -255,6 +255,25 @@ def run():
         finally:
             h._ollama_http, h.ollama_pid = real_req, real_pid
         check("status reports not running", st.get("running") is False, st)
+        # ---- Start Model = load the tag, with a keep_alive ----
+        seen = {}
+        real_http = h._ollama_http
+        try:
+            def fake_run(path, port=None, timeout=None, payload=None):
+                seen["path"] = path
+                seen["payload"] = payload
+                return {}
+            h._ollama_http = fake_run
+            res = h.ollama_run("qwen2.5:72b-instruct-q4_K_M", keep_alive="30m")
+            check("run posts to /api/generate", seen.get("path") == "/api/generate", seen)
+            check("run sends the tag and keep_alive",
+                  seen.get("payload", {}).get("model") == "qwen2.5:72b-instruct-q4_K_M"
+                  and seen.get("payload", {}).get("keep_alive") == "30m", seen.get("payload"))
+            check("run asks for no generation", seen.get("payload", {}).get("stream") is False)
+            check("empty tag is refused", h.ollama_run("")["ok"] is False)
+        finally:
+            h._ollama_http = real_http
+
         # ---- "is it actually running?" comes from /api/ps, not from the daemon ----
         real_http = h._ollama_http
         try:
