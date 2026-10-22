@@ -1165,6 +1165,28 @@ PYCODE
     fi
 
     if [ "$is_vis" = "yes" ]; then
+        # mlx-vlm ships automatic prefix caching (APC) but leaves it off. Off means
+        # every turn re-prefills the whole conversation — ~49 s of silence for a
+        # 63k-token harness prompt whose only new part is "hello".
+        local pc_flags
+        pc_flags=$(python3 - "$PID_DIR" "$SCRIPT_DIR" <<'PYCODE'
+import sys
+for p in (sys.argv[2], sys.argv[1]):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+import mlx_helper as h
+on, blocks, gb = h.prefix_cache_settings()
+print(int(on), blocks, gb)
+PYCODE
+)
+        read -r pc_on pc_blocks pc_gb <<<"$pc_flags"
+        if [ "${MLX_VLM_APC:-1}" != "0" ] && [ "${pc_on:-1}" = "1" ]; then
+            export APC_ENABLED="${APC_ENABLED:-1}"
+            export APC_BLOCK_SIZE="${APC_BLOCK_SIZE:-16}"
+            export APC_NUM_BLOCKS="${APC_NUM_BLOCKS:-${pc_blocks:-4096}}"
+            export MLX_VLM_CACHE_HOME="${MLX_VLM_CACHE_HOME:-$HOME/.cache/mlx-vlm}"
+            [ "${pc_gb:-20}" != "0" ] && export APC_DISK_MAX_GB="${APC_DISK_MAX_GB:-$pc_gb}"
+        fi
         nohup uvx --from mlx-vlm --with jinja2 python -m mlx_vlm.server \
             --model "$model_path" \
             --host "$host" \
@@ -1519,7 +1541,7 @@ main_menu() {
     while true; do
         clear 2>/dev/null || true
         echo "╔════════════════════════════════════════════════════════════╗"
-        echo "║     MLX Model Control Center v0.10.1 (MLX Controller)       ║"
+        echo "║     MLX Model Control Center v0.10.2 (MLX Controller)       ║"
         echo "╚════════════════════════════════════════════════════════════╝"
         show_running_header
         echo "  1. List Downloaded Models (Select # to Launch)"

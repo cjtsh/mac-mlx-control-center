@@ -1,5 +1,5 @@
 
-# ⚡ macOS MLX Control Center `v0.10.1` (MLX Controller Edition)
+# ⚡ macOS MLX Control Center `v0.10.2` (MLX Controller Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -244,6 +244,54 @@ python3 tests/test_token_budget.py
 ```
 
 Tests: `python3 tests/test_stream_guard.py` (no model download, no network).
+
+## ⚡ Prefix Cache: Why “hello” Took 90 Seconds (v0.10.2)
+
+**Symptom:** a harness that carries a big context answers a two-word question after a minute of
+silence. The model is fine, the tokens are fine, the engine was just re-reading the entire
+conversation every turn.
+
+**Cause:** `mlx-vlm` ships automatic prefix caching (APC — reusable KV blocks, warm memory plus a
+warm-disk tier), but the OpenAI-compatible server only builds it when `APC_ENABLED` is set, and the
+default is **off**. With it off every request logs `cached_tokens=0`, so a 63,000-token agent prompt
+is prefilled from token zero — about **49 s** before the first token, even when the only new text is
+“hello”.
+
+**Fix:** launches of `mlx-vlm` now export the cache environment, sized from settings:
+
+```bash
+APC_ENABLED=1
+APC_BLOCK_SIZE=16            # 16 tokens per reusable block
+APC_NUM_BLOCKS=4096          # 65,536 reusable tokens in RAM
+MLX_VLM_CACHE_HOME=~/.cache/mlx-vlm
+APC_DISK_MAX_GB=20           # warm-disk tier survives restarts
+```
+
+Measured on the 288-billion-parameter MoE model, three turns of one growing conversation:
+
+| turn | prompt tokens | cached | prefill |
+|---|---|---|---|
+| 1 | 7,556 | 0 | **11.460 s** |
+| 2 | 7,579 | 7,555 | **0.442 s** |
+| 3 | 7,602 | 7,578 | **0.261 s** |
+
+* **Only turns that share a prefix get faster.** The first turn of a session still prefills
+  everything — that part is the model reading the context, not an overhead.
+* **`mlx-lm` is untouched:** it has its own prompt cache and ignores these variables. (Upstream,
+  streamed `mlx-lm` requests do not store cache entries — a single non-streamed request seeds it.)
+* **Visible** in the dashboard (`⚡ Prefix cache on · N% of prefilled tokens reused`, read from the
+  server's `/v1/cache/stats`) and in `~/.mlx_logs/stream_guard.log`, which now logs a
+  `prefix hash=` for every request. If two turns show different hashes, the harness changed the
+  front of the prompt (a timestamp in the system message will do it) and no cache can help.
+
+```bash
+# settings.json
+{"prefix_cache": true, "prefix_cache_blocks": 4096, "prefix_cache_disk_gb": 20}
+
+MLX_VLM_APC=0 ./mlx.sh start <model>   # launch without the cache
+python3 tests/test_prefix_cache.py     # 22 checks, no model download
+```
+
 
 ## 🔄 Sync Installed Models into DeepSeek Harness (v0.8.4, vision fix in v0.8.9)
 

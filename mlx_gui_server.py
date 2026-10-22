@@ -143,8 +143,10 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             stats = mlx_helper.get_system_stats()
             downloads = mlx_helper.get_active_downloads()
             config = mlx_helper.load_global_settings()
+            live_port = servers[0].get("port") if servers else config.get("default_port")
             self.send_json({"servers": servers, "stats": stats, "downloads": downloads, "config": config,
-                            "stream_guard": mlx_helper.stream_guard_status()})
+                            "stream_guard": mlx_helper.stream_guard_status(),
+                            "prefix_cache": mlx_helper.apc_status(live_port)})
         elif path == "/api/config":
             config = mlx_helper.load_global_settings()
             self.send_json(config)
@@ -441,6 +443,11 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             # Keeps the harness's stream alive through a silent prefill or a long
             # tool call, and guarantees a terminal `data: [DONE]` event.
             env = mlx_helper.stream_guard_env(env)
+
+            # Reuse the KV of the prefix a turn shares with the previous one. Without
+            # it every turn re-prefills the entire conversation (a 63k-token prompt
+            # costs ~49 s before the first token, even when the new text is "hello").
+            env = mlx_helper.apc_env(env, engine=use_engine)
 
             with open(log_file, "a") as lf:
                 proc = subprocess.Popen(cmd, stdout=lf, stderr=lf, env=env)
@@ -804,7 +811,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.10.1 (MLX Controller)</title>
+  <title>macOS MLX Control Center v0.10.2 (MLX Controller)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1245,7 +1252,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.10.1 (MLX Controller)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.10.2 (MLX Controller)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
@@ -2868,6 +2875,25 @@ INDEX_HTML = """<!DOCTYPE html>
             </div>`;
         }
 
+        // Prefix cache: with APC on, a turn only prefills the part of the prompt it
+        // does not share with the previous one, so a harness re-sending 63k tokens
+        // costs a suffix instead of a minute.
+        const pc = data.prefix_cache || {};
+        let pcPill = '';
+        if (pc.enabled) {
+          const pcOn = !!pc.server_enabled;
+          const bits = [];
+          if (pcOn && pc.hit_rate !== null && pc.hit_rate !== undefined) {
+            bits.push(Math.round(pc.hit_rate * 100) + '% of prefilled tokens reused');
+          }
+          if (pcOn && pc.lookups_hit) bits.push(pc.lookups_hit + ' hit(s)');
+          const pcdetail = bits.length ? ' &middot; ' + bits.join(' &middot; ') : '';
+          pcPill = `
+            <div class="status-pill ${pcOn ? 'ready' : 'none'}" title="Automatic prefix caching (mlx-vlm APC): reusable KV blocks are kept in RAM and on disk, so a turn only prefills the suffix that changed.">
+              <span class="status-dot ${pcOn ? '' : 'pulse'}"></span> ⚡ Prefix cache ${pcOn ? 'on' : 'armed'}${pcdetail}
+            </div>`;
+        }
+
         if (activeServers.length > 0) {
           const readyCount = activeServers.filter(s => s.status === 'READY').length;
           statusHeader.innerHTML = `
@@ -2875,6 +2901,7 @@ INDEX_HTML = """<!DOCTYPE html>
               <span class="status-dot"></span> ${activeServers.length} Active MLX Server(s) (${readyCount} Ready)
             </div>`;
           statusHeader.innerHTML += guardPill;
+          statusHeader.innerHTML += pcPill;
           
           serverContainer.innerHTML = '';
           activeServers.forEach(s => {
@@ -2915,6 +2942,7 @@ INDEX_HTML = """<!DOCTYPE html>
               <span class="status-dot"></span> 0 Active MLX Servers
             </div>`;
           statusHeader.innerHTML += guardPill;
+          statusHeader.innerHTML += pcPill;
           serverContainer.innerHTML = `<div class="card" style="grid-column: 1 / -1; width: 100%; text-align: center; color: var(--text-muted); padding: 18px;">No model currently running. Click "Start Model" on any downloaded model below!</div>`;
         }
 

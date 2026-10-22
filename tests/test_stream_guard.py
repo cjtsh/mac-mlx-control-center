@@ -283,6 +283,48 @@ def test_max_completion_tokens_bridge():
         sg._cfg()["fix_max_tokens"] = saved
 
 
+def test_prefix_fingerprint():
+    """Prefix hash tells a cache miss caused by the prompt from one caused by the cache."""
+    body_a = json.dumps({"messages": [
+        {"role": "system", "content": "You are a coding agent."},
+        {"role": "user", "content": "hello"},
+    ]}).encode()
+    body_b = json.dumps({"messages": [
+        {"role": "system", "content": "You are a coding agent."},
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "again"},
+    ]}).encode()
+    body_ts = json.dumps({"messages": [
+        {"role": "system", "content": "Time sampled: 11:40:25"},
+        {"role": "user", "content": "hello"},
+    ]}).encode()
+
+    sg._note_prefix(body_a)
+    first = state().get("last_prefix") or {}
+    check("prefix: records a hash", bool(first.get("hash")), first)
+    check("prefix: first request is not called stable", state().get("prefix_stable") is False, state())
+    check("prefix: captures the system head", "coding agent" in (first.get("system_head") or ""), first)
+
+    # A growing conversation keeps the shared prefix -> same hash, stable.
+    sg._note_prefix(body_b)
+    second = state().get("last_prefix") or {}
+    check("prefix: growing history keeps the hash", second.get("hash") == first.get("hash"), (first, second))
+    check("prefix: stable when the prefix repeats", state().get("prefix_stable") is True, state())
+
+    # A timestamp in the system prompt changes the first tokens -> new hash.
+    sg._note_prefix(body_ts)
+    third = state().get("last_prefix") or {}
+    check("prefix: timestamp in system prompt changes the hash",
+          third.get("hash") != first.get("hash"), (first, third))
+    check("prefix: unstable after a timestamp", state().get("prefix_stable") is False, state())
+
+    # Bodies that are not chat JSON must not raise.
+    sg._note_prefix(b"not json")
+    sg._note_prefix(json.dumps({"messages": "nope"}).encode())
+    check("prefix: junk bodies are ignored", True)
+
+
 if __name__ == "__main__":
     print("stream_guard unit checks")
     test_heartbeat_and_terminator()
@@ -294,5 +336,6 @@ if __name__ == "__main__":
     test_non_sse_untouched()
     test_zero_chunk_stream_gets_terminator()
     test_max_completion_tokens_bridge()
+    test_prefix_fingerprint()
     print("\n%d failure(s)" % len(FAILS))
     sys.exit(1 if FAILS else 0)

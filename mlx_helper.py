@@ -28,7 +28,10 @@ def load_global_settings():
         "default_temp": 0.0,
         "default_max_tokens": 0,  # 0 = derive from the loaded model's context window
         "auto_sync_agents": True,
-        "turbo_downloads": True
+        "turbo_downloads": True,
+        "prefix_cache": True,          # reuse the KV of a prompt prefix shared by two turns
+        "prefix_cache_blocks": 4096,   # 16 tokens per block -> 65,536 reusable tokens
+        "prefix_cache_disk_gb": 20,    # warm-disk tier that survives a restart
     }
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -387,6 +390,92 @@ def stream_guard_status():
     info["mode"] = state.get("mode")
     info["last"] = state.get("last")
     info["age_seconds"] = None if age is None else round(age, 1)
+    return info
+
+# ---------------------------------------------------------------------------
+# Prefix cache (mlx-vlm's "Automatic Prefix Caching", APC)
+# ---------------------------------------------------------------------------
+# mlx-vlm ships APC, but the OpenAI-compatible server only builds it when
+# APC_ENABLED is set; the default is off. With it off, every turn re-prefills the
+# whole conversation (cached_tokens=0 in every log line) — 49 s of silence for a
+# 63k-token prompt, even when the only new part is "hello". Turning it on lets a
+# turn reuse the KV of the prefix it shares with the previous turn and prefill just
+# the suffix. mlx-lm has its own prompt cache and ignores these variables.
+APC_CACHE_HOME = os.path.expanduser("~/.cache/mlx-vlm")
+APC_DEFAULT_BLOCKS = 4096      # 16 tokens/block -> 65,536 reusable tokens in RAM
+APC_BLOCK_SIZE = 16
+APC_DEFAULT_DISK_GB = 20
+
+def prefix_cache_settings():
+    """(enabled, blocks, disk_gb) from settings.json, with safe fallbacks."""
+    st = load_global_settings()
+    enabled = st.get("prefix_cache", True)
+    if isinstance(enabled, str):
+        enabled = enabled.strip().lower() not in ("0", "false", "no", "off", "")
+    try:
+        blocks = int(st.get("prefix_cache_blocks") or APC_DEFAULT_BLOCKS)
+    except Exception:
+        blocks = APC_DEFAULT_BLOCKS
+    try:
+        disk_gb = float(st.get("prefix_cache_disk_gb", APC_DEFAULT_DISK_GB))
+    except Exception:
+        disk_gb = float(APC_DEFAULT_DISK_GB)
+    return bool(enabled), max(1, blocks), max(0.0, disk_gb)
+
+def apc_env(env=None, engine="mlx-vlm"):
+    """Environment that switches on mlx-vlm's prefix cache.
+
+    Set MLX_VLM_APC=0 to launch without it. Non-VLM engines already have a prompt
+    cache of their own, so they are left untouched.
+    """
+    env = dict(env if env is not None else os.environ)
+    if engine != "mlx-vlm":
+        return env
+    if (env.get("MLX_VLM_APC") or os.environ.get("MLX_VLM_APC") or "").strip() == "0":
+        return env
+    enabled, blocks, disk_gb = prefix_cache_settings()
+    if not enabled:
+        return env
+    env.setdefault("APC_ENABLED", "1")
+    env.setdefault("APC_BLOCK_SIZE", str(APC_BLOCK_SIZE))
+    env.setdefault("APC_NUM_BLOCKS", str(blocks))
+    env.setdefault("MLX_VLM_CACHE_HOME", APC_CACHE_HOME)
+    if disk_gb > 0:
+        env.setdefault("APC_DISK_MAX_GB", str(disk_gb))
+    else:
+        env.setdefault("APC_DISK_ENABLED", "0")
+    return env
+
+def apc_status(port=None, timeout=1.5):
+    """Prefix-cache state for the dashboard: configured, and what the server reports."""
+    enabled, blocks, disk_gb = prefix_cache_settings()
+    info = {
+        "enabled": enabled,
+        "blocks": blocks,
+        "disk_gb": disk_gb,
+        "cache_home": APC_CACHE_HOME,
+        "server_running": False,
+        "server_enabled": False,
+        "hit_rate": None,
+        "matched_tokens": 0,
+    }
+    if not port:
+        return info
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{int(port)}/v1/cache/stats")
+        with urllib.request.urlopen(req, timeout=timeout) as fh:
+            data = json.load(fh)
+        info["server_running"] = True
+        info["server_enabled"] = bool(data.get("enabled"))
+        if info["server_enabled"]:
+            info["hit_rate"] = data.get("token_hit_rate")
+            info["matched_tokens"] = data.get("matched_tokens") or 0
+            info["lookups_hit"] = data.get("lookups_hit") or 0
+            info["lookups_miss"] = data.get("lookups_miss") or 0
+            info["resident_bytes"] = data.get("resident_bytes")
+            info["disk_bytes"] = data.get("disk_bytes")
+    except Exception as exc:
+        info["error"] = str(exc)
     return info
 
 STORAGE_FILE = os.path.expanduser("~/.mlx_pids/storage.json")

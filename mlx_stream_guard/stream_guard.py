@@ -36,6 +36,7 @@ as before, and ``MLX_STREAM_GUARD=0`` disables the guard completely.
 
 import asyncio
 import contextvars
+import hashlib
 import json
 import os
 import sys
@@ -430,6 +431,59 @@ def _count_max_tokens_fix(value):
         pass
 
 
+def _content_text(part):
+    content = part.get("content") if isinstance(part, dict) else None
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            p.get("text", "") for p in content
+            if isinstance(p, dict) and p.get("type") in (None, "text")
+        )
+    return ""
+
+
+def _note_prefix(raw):
+    """Fingerprint the part of a chat request that a prefix cache could reuse.
+
+    Prefix caching only pays off when consecutive turns start with the same tokens.
+    If a harness injects a timestamp (or reorders context) at the front of the
+    prompt, every turn is a cache miss and the engine looks broken. Recording the
+    hash and the head of the system message makes that diagnosable after the fact.
+    """
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return
+    # The reusable part is whatever comes before the new suffix, so only the *head*
+    # of the conversation has to stay byte-identical across turns. Hashing the whole
+    # history would change on every turn even when the cache would hit.
+    first_user = next((m for m in messages
+                       if isinstance(m, dict) and m.get("role") == "user"), None)
+    head = json.dumps([messages[0], first_user], sort_keys=True,
+                      ensure_ascii=False, default=str)[:4000]
+    digest = hashlib.sha1(head.encode("utf-8", "replace")).hexdigest()[:12]
+    head_text = _content_text(messages[0])
+    info = {
+        "hash": digest,
+        "messages": len(messages),
+        "prefix_chars": len(head),
+        "prompt_chars": len(json.dumps(messages, ensure_ascii=False, default=str)),
+        "system_head": head_text[:160],
+    }
+    with _STATE_LOCK:
+        previous = _STATE.get("last_prefix") or {}
+        _STATE["previous_prefix"] = previous
+        _STATE["last_prefix"] = info
+        _STATE["prefix_stable"] = bool(previous) and previous.get("hash") == digest
+        _write_state()
+    _write_log("prefix hash=%s messages=%d prompt_chars=%d head=%r"
+               % (digest, len(messages), info["prompt_chars"], head_text[:120]))
+
+
 def _rewriting_receive(scope, receive):
     """Wrap ASGI receive so the JSON body can be adjusted before the app parses it."""
     state = {"done": False}
@@ -448,6 +502,7 @@ def _rewriting_receive(scope, receive):
                 break
             chunks.append(message.get("body") or b"")
         raw = b"".join(chunks)
+        _note_prefix(raw)
         try:
             fixed = _rename_max_tokens(raw)
         except Exception as exc:  # noqa: BLE001
