@@ -544,6 +544,10 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
             self.send_json(result)
+        elif path == "/api/ollama/unload":
+            tag = (payload.get("model") or payload.get("tag") or "").strip()
+            result = mlx_helper.ollama_unload(tag or None)
+            self.send_json(result)
         elif path == "/api/ollama/run":
             tag = (payload.get("model") or payload.get("tag") or "").strip()
             keep = (payload.get("keep_alive") or "30m").strip()
@@ -557,6 +561,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
 
             servers = mlx_helper.get_running_servers()
             stopped = []
+            unloaded = []
 
             if stop_all:
                 for s in servers:
@@ -573,6 +578,11 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                             os.kill(int(pid_str), 9)
                 except Exception:
                     pass
+                # The Ollama daemon is shared, so stop the models, not the daemon.
+                try:
+                    unloaded = mlx_helper.ollama_unload().get("unloaded", [])
+                except Exception:
+                    unloaded = []
             elif stop_unresponsive:
                 for s in servers:
                     if "UNRESPONSIVE" in s["status"]:
@@ -598,7 +608,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
 
-            self.send_json({"status": "ok", "stopped": stopped})
+            self.send_json({"status": "ok", "stopped": stopped, "unloaded": unloaded})
 
         elif path == "/api/clear_logs":
             target_log = payload.get("name", "")
@@ -770,6 +780,10 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                 }, 409)
                 return
 
+            # A vision GGUF needs its projector file too: selecting one .gguf
+            # pulls in the matching mmproj automatically.
+            include_patterns = mlx_helper.with_gguf_projectors(repo_id, include_patterns, revision=revision)
+
             paused = mlx_helper.load_paused_downloads()
             if download_id in paused:
                 del paused[download_id]
@@ -789,12 +803,13 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             turbo_used = False
             if cfg.get("turbo_downloads", True) and hub_dir:
                 try:
-                    plan = mlx_helper.turbo_plan(repo_id)
+                    plan = mlx_helper.turbo_plan(repo_id, include=include_patterns or None)
                 except Exception:
                     plan = {"files": []}
                 if plan.get("files"):
                     cmd = [sys.executable, mlx_helper.__file__, "turbo_download", repo_id,
-                           hub_dir, download_id, subfolder, revision]
+                           hub_dir, download_id, subfolder, revision,
+                           json.dumps(include_patterns or [])]
                     turbo_used = True
 
             proc = subprocess.Popen(cmd, env=env)
@@ -910,7 +925,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
 
 # One source of truth for the release: the title, the badge and the banner all
 # read this, so they can no longer drift apart (v0.11.6 shipped a stale badge).
-APP_VERSION = "0.11.11"
+APP_VERSION = "0.11.12"
 
 INDEX_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -3144,6 +3159,7 @@ INDEX_HTML = """<!DOCTYPE html>
                   </div>
                 </div>
                 <div class="card-actions">
+                  <button class="btn btn-danger" onclick='stopOllamaModel(${JSON.stringify(l.id)})'>🛑 Stop Model</button>
                   <button class="btn btn-secondary" onclick="switchTab('test'); loadTestServers();">🧪 Test API</button>
                   <button class="btn btn-secondary" onclick="openOllamaModal()">🦙 Manage</button>
                 </div>
@@ -3441,10 +3457,10 @@ INDEX_HTML = """<!DOCTYPE html>
         const d = await res.json();
         const files = d.files || [];
         if (!files.length) { body.innerHTML = '<p>No .gguf files in this repo.</p>'; return; }
-        body.innerHTML = `<p style="margin-bottom:10px;">Pick one file - a GGUF repo usually holds several quants.</p>
+        body.innerHTML = `<p style="margin-bottom:10px;">Pick one file - a GGUF repo usually holds several quants. A vision model's <code>mmproj</code> projector is fetched automatically with its weights.</p>
           <table style="width:100%; border-collapse:collapse; font-size:12px;">
           ${files.map(f => `<tr>
-            <td style="padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.06); color:#f3f4f6;">${f.path}</td>
+            <td style="padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.06); color:#f3f4f6;">${f.path}${/mmproj|projector/i.test(f.path) ? ' <span style="font-size:10px; padding:1px 6px; border-radius:8px; background:rgba(168,85,247,0.2); color:#d8b4fe;">projector</span>' : ''}</td>
             <td style="padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.06);">${f.size_gb} GB</td>
             <td style="padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.06); text-align:right;">
               <button class="btn btn-primary" style="padding:6px 12px; font-size:12px;" onclick='downloadGguf(${JSON.stringify(f.path)}, ${f.size_gb})'>💾 Download</button>
@@ -4128,8 +4144,25 @@ INDEX_HTML = """<!DOCTYPE html>
       }
     }
 
+    async function stopOllamaModel(tag) {
+      try {
+        const res = await fetch('/api/ollama/unload', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: tag })
+        });
+        const d = await res.json();
+        if (d.still_loaded && d.still_loaded.length) {
+          alert('Still loaded: ' + d.still_loaded.join(', '));
+        }
+      } catch (e) {
+        alert('Could not stop ' + tag + ': ' + e);
+      }
+      await loadStatus();
+      await loadModels();
+    }
+
     async function killAllServers() {
-      if (confirm("Kill all running MLX servers?")) {
+      if (confirm("Stop every running model — MLX servers and Ollama models? (The Ollama daemon itself keeps running.)")) {
         await fetch('/api/stop', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

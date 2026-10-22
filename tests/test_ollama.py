@@ -275,6 +275,57 @@ def run():
         finally:
             h._ollama_http = real_http
 
+        # ---- vision support is what the engine reports, not the name ----
+        real_http = h._ollama_http
+        try:
+            h._ollama_http = lambda path, port=None, timeout=None, payload=None: (
+                {"capabilities": ["completion", "vision"]}
+                if path == "/api/show" else {"models": []})
+            h._OLLAMA_CAPS_CACHE.clear()
+            check("a vision tag is recognised",
+                  "vision" in h.ollama_model_capabilities("qwen2.5vl:7b"), True)
+            h._OLLAMA_CAPS_CACHE.clear()
+            h._ollama_http = lambda path, port=None, timeout=None, payload=None: (
+                {"capabilities": ["completion", "tools"]}
+                if path == "/api/show" else {"models": []})
+            check("a text-only tag is not called vision",
+                  "vision" not in h.ollama_model_capabilities("qwen2.5:72b"), False)
+        finally:
+            h._OLLAMA_CAPS_CACHE.clear()
+            h._ollama_http = real_http
+
+        # ---- Stop Model and the kill switch both reach Ollama ----
+        calls = []
+        real_http = h._ollama_http
+        try:
+            def fake_unload(path, port=None, timeout=None, payload=None):
+                calls.append((path, payload))
+                return {"models": []}
+            h._ollama_http = fake_unload
+            res = h.ollama_unload("qwen2.5:72b-instruct-q4_K_M")
+            check("unload sends keep_alive 0",
+                  any(p and p.get("keep_alive") == 0 for _, p in calls), calls)
+            check("unload reports nothing left", res.get("still_loaded") == [], res)
+            calls.clear()
+            h.ollama_unload()
+            check("unload with no tag only asks the engine what is loaded",
+                  all(p == "/api/ps" for p, _ in calls), calls)
+        finally:
+            h._ollama_http = real_http
+
+        # ---- a projector beside the weights is picked up automatically ----
+        import tempfile as _tf
+        d = _tf.mkdtemp()
+        open(os.path.join(d, "model-Q4_K_M.gguf"), "w").write("x")
+        open(os.path.join(d, "mmproj-model-f16.gguf"), "w").write("x")
+        check("the mmproj is found next to the weights",
+              h.gguf_projector_for(os.path.join(d, "model-Q4_K_M.gguf")).endswith("mmproj-model-f16.gguf"))
+        plain = _tf.mkdtemp()
+        open(os.path.join(plain, "other.gguf"), "w").write("x")
+        open(os.path.join(plain, "other-Q8_0.gguf"), "w").write("x")
+        check("another quant is not mistaken for a projector",
+              h.gguf_projector_for(os.path.join(plain, "other.gguf")) == "")
+
         # ---- "is it actually running?" comes from /api/ps, not from the daemon ----
         real_http = h._ollama_http
         try:

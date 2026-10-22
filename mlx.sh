@@ -1543,7 +1543,7 @@ main_menu() {
     while true; do
         clear 2>/dev/null || true
         echo "╔════════════════════════════════════════════════════════════╗"
-        echo "║     MLX Model Control Center v0.11.11 (MLX + Ollama)       ║"
+        echo "║     MLX Model Control Center v0.11.12 (MLX + Ollama)       ║"
         echo "╚════════════════════════════════════════════════════════════╝"
         show_running_header
         echo "  1. List Downloaded Models (Select # to Launch)"

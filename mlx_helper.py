@@ -144,8 +144,12 @@ def hf_storage_backend():
 
 def get_hf_token():
     token = (load_secrets().get("token") or os.environ.get("HF_TOKEN")
-             or os.environ.get("HUGGING_FACE_HUB_TOKEN") or "")
-    return token.strip()
+             or os.environ.get("HUGGING_FACE_HUB_TOKEN") or "").strip()
+    # A revoked token breaks every anonymous call that carries it (401 instead of
+    # a real answer), so an unusable token is the same as no token here.
+    if token and not hf_token_usable(token):
+        return ""
+    return token
 
 _HF_TOKEN_STATE = {"token": "", "usable": None, "status": 0, "ts": 0.0}
 
@@ -681,6 +685,24 @@ def ollama_runner_rss_gb():
             continue
     return round(total_kb / (1024**2), 2)
 
+def ollama_unload(tag=None, port=None, timeout=60):
+    """Unload one tag (or every loaded model) from the engine's memory.
+
+    keep_alive: 0 tells Ollama to drop the model now; an empty prompt means no
+    generation is requested, only the unload.
+    """
+    tags = [tag] if tag else [m["id"] for m in ollama_ps(port=port)]
+    done = []
+    for t in tags:
+        try:
+            _ollama_http("/api/generate", port=port, timeout=timeout,
+                         payload={"model": t, "prompt": "", "stream": False, "keep_alive": 0})
+            done.append(t)
+        except Exception:
+            pass
+    remaining = [m["id"] for m in ollama_ps(port=port)]
+    return {"ok": True, "unloaded": done, "still_loaded": remaining}
+
 def ollama_run(tag, port=None, keep_alive="30m", timeout=900):
     """Load a model into the engine's memory (Ollama's equivalent of Start Model).
 
@@ -741,6 +763,7 @@ def ollama_models(port=None, timeout=3.0):
         if not name:
             continue
         details = m.get("details") or {}
+        caps = ollama_model_capabilities(name, port=port)
         out.append({
             "id": name,
             "name": name,
@@ -749,9 +772,36 @@ def ollama_models(port=None, timeout=3.0):
             "family": details.get("family") or "",
             "parameter_size": details.get("parameter_size") or "",
             "quantization": details.get("quantization_level") or "",
+            "capabilities": caps,
+            "is_vision": "vision" in caps,
+            "supports_tools": "tools" in caps,
         })
     out.sort(key=lambda x: x["id"])
     return out
+
+_OLLAMA_CAPS_CACHE = {}
+
+def ollama_model_capabilities(name, port=None, timeout=3.0):
+    """What the engine says this model can do: e.g. ['completion','tools','vision'].
+
+    This is the only reliable way to know whether a tag is multimodal: the name
+    and the family are guesses, the capability list is the engine's own answer.
+    """
+    if not name:
+        return []
+    key = (name, port)
+    now = time.time()
+    hit = _OLLAMA_CAPS_CACHE.get(key)
+    if hit and now - hit[0] < 300:
+        return hit[1]
+    try:
+        data = _ollama_http("/api/show", port=port, payload={"model": name}, timeout=timeout) or {}
+    except Exception:
+        return []
+    caps = data.get("capabilities") if isinstance(data, dict) else None
+    caps = [str(c) for c in (caps or []) if c]
+    _OLLAMA_CAPS_CACHE[key] = (now, caps)
+    return caps
 
 def ollama_context_length(name, port=None, timeout=3.0):
     """Trained context length for one model, from /api/show; None if unknown."""
@@ -1005,6 +1055,24 @@ def ollama_chat_template_for(family):
             return tmpl
     return ""
 
+def gguf_projector_for(gguf_path):
+    """The mmproj/clip projector shipped beside a vision GGUF, if there is one.
+
+    Ollama needs it as a second FROM line in the Modelfile; without it the file
+    loads as a text-only model and image prompts are rejected.
+    """
+    try:
+        folder = os.path.dirname(os.path.abspath(gguf_path))
+        for fn in sorted(os.listdir(folder)):
+            low = fn.lower()
+            if not low.endswith(".gguf") or fn == os.path.basename(gguf_path):
+                continue
+            if "mmproj" in low or "projector" in low or low.startswith("clip"):
+                return os.path.join(folder, fn)
+    except Exception:
+        pass
+    return ""
+
 def ollama_import(gguf_path, name=None, port=None, wait_seconds=180):
     """Create an Ollama model from a local GGUF file.
 
@@ -1025,7 +1093,12 @@ def ollama_import(gguf_path, name=None, port=None, wait_seconds=180):
             return {"ok": True, "tag": existing, "reused": True,
                     "message": f"Already in Ollama as {existing}",
                     "output": ""}
+    # Vision GGUF repos keep the multimodal projector in a second file; Ollama
+    # needs both FROM lines or the model comes up text-only.
+    projector = gguf_projector_for(gguf_path)
     modelfile = f"FROM {gguf_path}\n"
+    if projector:
+        modelfile += f"FROM {projector}\n"
     if cfg["context"] > 0:
         modelfile += f"PARAMETER num_ctx {cfg['context']}\n"
     env = dict(os.environ)
@@ -1190,7 +1263,10 @@ def ollama_harness_models(port=None):
             "maxTokens": output_token_budget(m["id"]),
             "size_gb": m.get("size_gb"),
             "family": m.get("family"),
-            "is_vision": bool(re.search(r"vl|vision|llava|qwen2\.5vl", m["id"], re.I)),
+            # Trust the engine's capabilities; fall back to the name only if the
+            # engine did not report any (older versions).
+            "is_vision": m.get("is_vision", False) if m.get("capabilities")
+                          else bool(re.search(r"vl|vision|llava|qwen2\.5vl", m["id"], re.I)),
         })
     return out
 
@@ -2101,6 +2177,27 @@ def parse_hf_identifier(input_str, explicit_subfolder=""):
         "display_name": display_name,
         "download_id": download_id
     }
+
+def with_gguf_projectors(repo_id, include, revision="main"):
+    """Add the mmproj/projector files to a GGUF selection.
+
+    A vision GGUF is useless without its projector, and the picker only lists the
+    weights file the user clicked. Pulling the projector in automatically is what
+    makes 'download a vision GGUF, press Import' work.
+    """
+    patterns = [str(p) for p in (include or [])]
+    if not patterns or not any(p.lower().endswith(".gguf") for p in patterns):
+        return patterns
+    try:
+        files = hf_repo_gguf_files(repo_id, revision=revision)
+    except Exception:
+        return patterns
+    for f in files:
+        path = f.get("path") or ""
+        low = path.lower()
+        if ("mmproj" in low or "projector" in low or os.path.basename(low).startswith("clip")) and path not in patterns:
+            patterns.append(path)
+    return patterns
 
 def hf_repo_gguf_files(repo_id, revision="main", timeout=12):
     """List the .gguf files in a repo with their sizes, smallest quant names last.
@@ -3075,8 +3172,12 @@ def read_turbo_statuses():
         out.append(data)
     return out
 
-def turbo_plan(repo_id):
-    """Which files are worth parallelising, and how many bytes that is."""
+def turbo_plan(repo_id, include=None):
+    """Which files are worth parallelising, and how many bytes that is.
+
+    `include` matters: without it a single-gguf download would be turbo-fetched as
+    the whole repo (a 660 GB mistake in a GGUF repo with 24 quants).
+    """
     token = get_hf_token()
     meta = fetch_repo_meta(repo_id, token=token)
     if not meta:
@@ -3087,7 +3188,10 @@ def turbo_plan(repo_id):
         size = sib.get("size") or lfs.get("size") or 0
         sha = lfs.get("sha256") or ""
         if sha and size >= TURBO_MIN_BYTES:
-            files.append({"path": sib.get("rfilename"), "size": int(size), "sha256": sha})
+            path = sib.get("rfilename") or ""
+            if include and not any(fnmatch.fnmatch(path, pat) for pat in include):
+                continue
+            files.append({"path": path, "size": int(size), "sha256": sha})
     files.sort(key=lambda f: -f["size"])
     return {"files": files, "bytes": sum(f["size"] for f in files)}
 
@@ -3222,11 +3326,11 @@ def turbo_fetch_file(repo_id, rel_path, size, sha256, hub_dir, token="", conns=N
     shutil.rmtree(parts_dir, ignore_errors=True)
     return {"ok": True, "skipped": False, "bytes": size}
 
-def turbo_download(repo_id, hub_dir, subfolder="", conns=None, download_id="", revision="main"):
+def turbo_download(repo_id, hub_dir, subfolder="", conns=None, download_id="", revision="main", include=None):
     """Download every >256 MB LFS blob with N parallel connections, then let the
     regular hub client finish (snapshot links, small files, refs)."""
     token = get_hf_token()
-    plan = turbo_plan(repo_id)
+    plan = turbo_plan(repo_id, include=include)
     files = plan.get("files") or []
     total = plan.get("bytes") or 0
     did = download_id or repo_id
@@ -4256,8 +4360,9 @@ if __name__ == "__main__":
         did = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else repo
         sub = sys.argv[5] if len(sys.argv) > 5 else ""
         rev = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] else "main"
+        inc = json.loads(sys.argv[7]) if len(sys.argv) > 7 and sys.argv[7] else None
         try:
-            res = turbo_download(repo, hub, subfolder=sub, download_id=did, revision=rev)
+            res = turbo_download(repo, hub, subfolder=sub, download_id=did, revision=rev, include=inc)
         except Exception as e:
             res = {"ok": False, "error": str(e)}
         if not res.get("ok"):
