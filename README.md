@@ -363,3 +363,8 @@ Model ID: **`default_model`** (Auto-Detect Active MLX Endpoint)
 ## 📜 License
 
 MIT License — free to use, modify, and share!
+
+
+## Legal notice
+
+This project is provided under the [MIT License](LICENSE). Review the [disclaimer](DISCLAIMER.md) before downloading models or running benchmarks and system changes. Model output and resource estimates are not professional advice.
