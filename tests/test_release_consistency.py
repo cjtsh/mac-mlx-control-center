@@ -85,6 +85,11 @@ check("config path is unchanged by the rename",
       support_dir in main_swift and support_dir in install_sh, support_dir)
 check("the dashboard no longer calls itself MLX-only",
       "macOS MLX Control Center" not in g.INDEX_HTML, "macOS MLX Control Center")
+check("the bundle and its executable are LLMController",
+      "<string>LLMController</string>" in plist
+      and "/Applications/LLMController.app" in install_sh, "LLMController")
+check("the installer still accepts the pre-1.0.1 asset name",
+      "MLXController.app.zip" in install_sh, "MLXController.app.zip")
 
 print()
 if failures:

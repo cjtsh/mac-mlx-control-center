@@ -1026,7 +1026,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showAbout() {
         let alert = NSAlert()
         alert.messageText = "LLM Controller"
-        alert.informativeText = "A small desktop controller for the macOS LLM Control Center.\n\nStarts and stops the local server; the dashboard opens in your browser.\n\nVersion 1.0"
+        alert.informativeText = "A small desktop controller for the macOS LLM Control Center.\n\nStarts and stops the local server; the dashboard opens in your browser.\n\nVersion 1.0.1"
         alert.icon = NSApp.applicationIconImage
         alert.addButton(withTitle: "OK")
         alert.runModal()

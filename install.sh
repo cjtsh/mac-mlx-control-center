@@ -9,7 +9,7 @@ echo "⚡ macOS LLM Control Center - 1-Click Launcher & Setup"
 echo "========================================================"
 
 TARGET_DIR="$HOME/mac-mlx-control-center"
-INSTALL_APP="/Applications/MLXController.app"
+INSTALL_APP="/Applications/LLMController.app"
 CONFIG_DIR="$HOME/Library/Application Support/MLX Controller"
 LOG_DIR="$HOME/.mlx_logs"
 PID_DIR="$HOME/.mlx_pids"
@@ -68,10 +68,10 @@ done
 
 # 5. Quit the old controller (if any) and stop the GUI gracefully
 quit_controller() {
-    if pgrep -x MLXController >/dev/null 2>&1; then
+    if pgrep -x LLMController >/dev/null 2>&1; then
         osascript -e 'tell application id "com.cjtsh.mlxcontroller" to quit' >/dev/null 2>&1 || true
         for _ in {1..30}; do
-            pgrep -x MLXController >/dev/null 2>&1 || break
+            pgrep -x LLMController >/dev/null 2>&1 || break
             sleep 0.1
         done
     fi
@@ -127,7 +127,7 @@ tell application "Finder"
     if exists alias file "LLM Controller" of desktop then
         delete alias file "LLM Controller" of desktop
     end if
-    set appAlias to make alias file to POSIX file "/Applications/MLXController.app" at desktop
+    set appAlias to make alias file to POSIX file "/Applications/LLMController.app" at desktop
     set name of appAlias to "LLM Controller"
 end tell
 APPLESCRIPT
@@ -146,16 +146,27 @@ else
     echo "🖥️  Downloading the prebuilt LLM Controller…"
     TMP_DIR="$(mktemp -d)"
     trap 'rm -rf "$TMP_DIR"' EXIT
-    URL="https://github.com/cjtsh/mac-mlx-control-center/releases/latest/download/MLXController.app.zip"
-    if ! curl -fL --retry 2 -o "$TMP_DIR/MLXController.app.zip" "$URL"; then
-        echo "❌ Could not download LLM Controller from $URL"
+    BASE="https://github.com/cjtsh/mac-mlx-control-center/releases/latest/download"
+    # Releases before 1.0.1 shipped MLXController.app.zip; accept either name so an
+    # older release still installs.
+    if curl -fL --retry 2 -o "$TMP_DIR/LLMController.app.zip" "$BASE/LLMController.app.zip"; then
+        ZIP="$TMP_DIR/LLMController.app.zip"
+    elif curl -fL --retry 2 -o "$TMP_DIR/LLMController.app.zip" "$BASE/MLXController.app.zip"; then
+        ZIP="$TMP_DIR/LLMController.app.zip"
+    else
+        echo "❌ Could not download LLM Controller from $BASE"
         echo "   Install Xcode Command Line Tools (xcode-select --install) and run this installer again."
         exit 1
     fi
-    ditto -x -k "$TMP_DIR/MLXController.app.zip" "$TMP_DIR"
+    ditto -x -k "$ZIP" "$TMP_DIR"
     quit_controller
     rm -rf "$INSTALL_APP"
-    mv "$TMP_DIR/MLXController.app" "$INSTALL_APP"
+    # The archive may still contain the pre-1.0.1 bundle name.
+    if [ -d "$TMP_DIR/LLMController.app" ]; then
+        mv "$TMP_DIR/LLMController.app" "$INSTALL_APP"
+    else
+        mv "$TMP_DIR/MLXController.app" "$INSTALL_APP"
+    fi
     xattr -dr com.apple.quarantine "$INSTALL_APP" 2>/dev/null || true
     codesign --force --deep --sign - "$INSTALL_APP" >/dev/null 2>&1 || true
     write_config

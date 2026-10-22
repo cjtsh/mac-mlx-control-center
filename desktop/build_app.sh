@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build (and optionally install) the MLX Controller desktop app.
+# Build (and optionally install) the LLM Controller desktop app.
 #
 #   ./desktop/build_app.sh                 # build into desktop/build/
 #   ./desktop/build_app.sh --install       # build + install to /Applications + Desktop alias
@@ -12,8 +12,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 BUILD_DIR="$HERE/build"
-APP="$BUILD_DIR/MLXController.app"
-INSTALL_TARGET="/Applications/MLXController.app"
+APP="$BUILD_DIR/LLMController.app"
+INSTALL_TARGET="/Applications/LLMController.app"
 CONFIG_DIR="$HOME/Library/Application Support/MLX Controller"
 PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || true)}"
 REPO_PATH="${MLX_REPO_PATH:-$ROOT}"
@@ -50,11 +50,11 @@ if [ ! -f "$HERE/AppIcon.icns" ]; then
     exit 1
 fi
 
-echo "🔨 Building MLX Controller…"
+echo "🔨 Building LLM Controller…"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-swiftc -swift-version 5 -O -framework Cocoa "$HERE/main.swift" -o "$APP/Contents/MacOS/MLXController"
+swiftc -swift-version 5 -O -framework Cocoa "$HERE/main.swift" -o "$APP/Contents/MacOS/LLMController"
 cp "$HERE/Info.plist" "$APP/Contents/Info.plist"
 cp "$HERE/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
@@ -69,10 +69,10 @@ echo "✓ Built $APP"
 
 if [ "$DO_INSTALL" -eq 1 ]; then
     echo "📦 Installing to ${INSTALL_TARGET}…"
-    if pgrep -x MLXController >/dev/null 2>&1; then
+    if pgrep -x LLMController >/dev/null 2>&1; then
         osascript -e 'tell application id "com.cjtsh.mlxcontroller" to quit' >/dev/null 2>&1 || true
         for _ in {1..20}; do
-            pgrep -x MLXController >/dev/null 2>&1 || break
+            pgrep -x LLMController >/dev/null 2>&1 || break
             sleep 0.1
         done
     fi
@@ -98,18 +98,20 @@ path.write_text(json.dumps({
 print("✓ Wrote", path)
 PY
 
+    # Drop the pre-1.0.1 alias so there is only one controller on the Desktop.
+    rm -f "$HOME/Desktop/MLX Controller"
     osascript <<'APPLESCRIPT' >/dev/null 2>&1 || {
 tell application "Finder"
-    if exists alias file "MLX Controller" of desktop then
-        delete alias file "MLX Controller" of desktop
+    if exists alias file "LLM Controller" of desktop then
+        delete alias file "LLM Controller" of desktop
     end if
-    set appAlias to make alias file to POSIX file "/Applications/MLXController.app" at desktop
-    set name of appAlias to "MLX Controller"
+    set appAlias to make alias file to POSIX file "/Applications/LLMController.app" at desktop
+    set name of appAlias to "LLM Controller"
 end tell
 APPLESCRIPT
-        ln -sfn "$INSTALL_TARGET" "$HOME/Desktop/MLX Controller"
+        ln -sfn "$INSTALL_TARGET" "$HOME/Desktop/LLM Controller"
     }
-    echo "✓ Desktop alias: $HOME/Desktop/MLX Controller"
+    echo "✓ Desktop alias: $HOME/Desktop/LLM Controller"
 
     if [ "$DO_OPEN" -eq 1 ]; then
         open "$INSTALL_TARGET"
