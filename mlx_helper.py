@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, json, hashlib, signal, shlex, subprocess, re, shutil, urllib.request, urllib.parse, urllib.error, socket, time, threading
+import os, sys, json, tempfile, hashlib, signal, shlex, subprocess, re, shutil, urllib.request, urllib.parse, urllib.error, socket, time, threading
 
 _REPO_SIZE_CACHE = {}
 _SPEED_CACHE = {}
@@ -34,6 +34,10 @@ def load_global_settings():
         "prefix_cache_disk_gb": 20,    # warm-disk tier that survives a restart
         "prefix_cache_entries": 4,     # whole-prefix snapshots in RAM (hybrid/VLM models)
         "prefix_cache_memory_gb": 16,  # ceiling for the in-RAM cache (mlx-vlm defaults to 8)
+        "ollama_port": 11434,          # the daemon listens here; every Ollama model shares it
+        "ollama_store": "",            # "" = ~/.ollama/models (read by the daemon at start)
+        "ollama_auto_start": True,
+        "ollama_context": 32768,       # OLLAMA_CONTEXT_LENGTH for daemons we launch
     }
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -142,9 +146,53 @@ def get_hf_token():
              or os.environ.get("HUGGING_FACE_HUB_TOKEN") or "")
     return token.strip()
 
+_HF_TOKEN_STATE = {"token": "", "usable": None, "status": 0, "ts": 0.0}
+
+def hf_token_usable(token=None, ttl=600):
+    """Is this stored token still accepted by Hugging Face?
+
+    A revoked token makes `hf download` answer "Model not found" for public repos,
+    which looks like a broken model instead of a broken credential. Probe once per
+    token and keep the answer for a few minutes; a network failure counts as usable
+    so an offline Mac can still download from a warm cache.
+    """
+    token = token or get_hf_token()
+    if not token:
+        return False
+    now = time.time()
+    st = _HF_TOKEN_STATE
+    if st["token"] == token and st["usable"] is not None and now - st["ts"] < ttl:
+        return st["usable"]
+    state, usable = 0, True
+    try:
+        req = urllib.request.Request(
+            "https://huggingface.co/api/whoami-v2",
+            headers={"Authorization": "Bearer " + token, "User-Agent": "mlx-control-center"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            state = getattr(resp, "status", 200)
+            usable = state == 200
+    except urllib.error.HTTPError as exc:
+        state = exc.code
+        usable = exc.code not in (401, 403)
+    except Exception:
+        state, usable = 0, True
+    _HF_TOKEN_STATE.update({"token": token, "usable": usable, "status": state, "ts": now})
+    return usable
+
+def hf_token_status():
+    """What the dashboard needs to warn about a dead credential."""
+    token = get_hf_token()
+    if not token:
+        return {"present": False, "usable": False, "status": 0}
+    return {"present": True, "usable": hf_token_usable(token),
+            "status": _HF_TOKEN_STATE.get("status", 0)}
+
 def hf_token_env():
     token = get_hf_token()
     if not token:
+        return {}
+    if not hf_token_usable(token):
+        # Sending a revoked token turns every public download into "not found".
         return {}
     return {"HF_TOKEN": token, "HUGGING_FACE_HUB_TOKEN": token}
 
@@ -503,6 +551,358 @@ def apc_status(port=None, timeout=1.5):
     except Exception as exc:
         info["error"] = str(exc)
     return info
+
+# ---------------------------------------------------------------------------
+# Ollama engine
+# ---------------------------------------------------------------------------
+# Ollama is a daemon: one process serves every model on one port (11434 by
+# default), unlike the MLX engines which are one process per model. Its store is
+# a content-addressed blob directory, not a folder of GGUF files, so the only way
+# to choose where weights live is OLLAMA_MODELS at daemon start. Everything here
+# therefore talks to the daemon (adopt it when it is already up) and treats the
+# store as a location, not a model list.
+OLLAMA_DEFAULT_PORT = 11434
+OLLAMA_DEFAULT_HOST = "127.0.0.1"
+OLLAMA_STORE_DEFAULT = os.path.expanduser("~/.ollama/models")
+OLLAMA_LAUNCH_AGENT = os.path.expanduser("~/Library/LaunchAgents/com.ollama.ollama.plist")
+OLLAMA_PID_DIR = os.path.expanduser("~/.mlx_pids")
+OLLAMA_LOG_DIR = os.path.expanduser("~/.mlx_logs")
+
+def ollama_bin():
+    """Path to the ollama CLI, or None."""
+    found = shutil.which("ollama")
+    if found:
+        return found
+    for cand in ("/opt/homebrew/bin/ollama", "/usr/local/bin/ollama", "/usr/bin/ollama"):
+        if os.path.exists(cand):
+            return cand
+    return None
+
+def ollama_settings():
+    """Engine settings from settings.json."""
+    st = load_global_settings()
+    def _num(key, default, cast):
+        try:
+            return cast(st.get(key, default))
+        except Exception:
+            return cast(default)
+    port = _num("ollama_port", OLLAMA_DEFAULT_PORT, int)
+    if port <= 0 or port > 65535:
+        port = OLLAMA_DEFAULT_PORT
+    store = str(st.get("ollama_store") or OLLAMA_STORE_DEFAULT)
+    return {
+        "port": port,
+        "store": store,
+        "auto_start": bool(st.get("ollama_auto_start", True)),
+        "context": max(0, _num("ollama_context", 32768, int)),
+    }
+
+def ollama_version(timeout=4):
+    exe = ollama_bin()
+    if not exe:
+        return None
+    try:
+        out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=timeout)
+        blob = (out.stdout or "") + (out.stderr or "")
+        m = re.search(r"(\d+\.\d+\.\d+)", blob)
+        return m.group(1) if m else blob.strip()[:40] or None
+    except Exception:
+        return None
+
+def _ollama_http(path, port=None, payload=None, timeout=3.0):
+    cfg = ollama_settings()
+    port = int(port or cfg["port"])
+    url = f"http://127.0.0.1:{port}{path}"
+    data = None
+    headers = {"User-Agent": "mlx-control-center"}
+    if payload is not None:
+        data = json.dumps(payload).encode()
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode() or "{}")
+
+def ollama_pid(port=None):
+    """PID listening on the Ollama port, or None."""
+    cfg = ollama_settings()
+    port = int(port or cfg["port"])
+    try:
+        out = subprocess.run(["lsof", "-ti", f":{port}", "-sTCP:LISTEN"],
+                             capture_output=True, text=True, timeout=5)
+        for line in out.stdout.split():
+            if line.strip().isdigit():
+                return int(line.strip())
+    except Exception:
+        pass
+    pid_file = os.path.join(OLLAMA_PID_DIR, f"ollama_{port}.pid")
+    try:
+        with open(pid_file) as fh:
+            return int(fh.read().strip())
+    except Exception:
+        return None
+
+def ollama_models(port=None, timeout=3.0):
+    """Models the running daemon can serve: id, size, family, params, context."""
+    try:
+        data = _ollama_http("/api/tags", port=port, timeout=timeout)
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+    out = []
+    for m in data.get("models", []) or []:
+        name = m.get("name") or m.get("model") or ""
+        if not name:
+            continue
+        details = m.get("details") or {}
+        out.append({
+            "id": name,
+            "name": name,
+            "size_gb": round((m.get("size") or 0) / (1024 ** 3), 2),
+            "modified": str(m.get("modified_at") or "")[:19].replace("T", " "),
+            "family": details.get("family") or "",
+            "parameter_size": details.get("parameter_size") or "",
+            "quantization": details.get("quantization_level") or "",
+        })
+    out.sort(key=lambda x: x["id"])
+    return out
+
+def ollama_context_length(name, port=None, timeout=3.0):
+    """Trained context length for one model, from /api/show; None if unknown."""
+    try:
+        data = _ollama_http("/api/show", port=port, payload={"model": name}, timeout=timeout)
+    except Exception:
+        return None
+    info = data.get("model_info") or {}
+    for key, val in info.items():
+        if key.endswith("context_length") and isinstance(val, int) and val > 0:
+            return val
+    for key, val in info.items():
+        if key.endswith(".context_length") and isinstance(val, int) and val > 0:
+            return val
+    return None
+
+_OLLAMA_STORE_CACHE = {"ts": 0.0, "path": "", "gb": 0.0}
+
+def ollama_store_gb(path=None, ttl=60):
+    """Size of the Ollama blob store. Cached: `du` on a 70 GB store is not free."""
+    cfg = ollama_settings()
+    path = path or cfg["store"]
+    now = time.time()
+    if (_OLLAMA_STORE_CACHE["path"] == path
+            and now - _OLLAMA_STORE_CACHE["ts"] < ttl):
+        return _OLLAMA_STORE_CACHE["gb"]
+    try:
+        out = subprocess.run(["du", "-sk", path], capture_output=True, text=True, timeout=15)
+        gb = round(int(out.stdout.split()[0]) / (1024 ** 2), 1)
+    except Exception:
+        gb = 0.0
+    _OLLAMA_STORE_CACHE.update({"ts": now, "path": path, "gb": gb})
+    return gb
+
+def ollama_status(port=None, with_models=True):
+    """Everything the dashboard needs to render the Ollama panel."""
+    cfg = ollama_settings()
+    port = int(port or cfg["port"])
+    exe = ollama_bin()
+    info = {
+        "installed": bool(exe),
+        "binary": exe or "",
+        "version": ollama_version() if exe else None,
+        "port": port,
+        "host": OLLAMA_DEFAULT_HOST,
+        "base_url": f"http://{OLLAMA_DEFAULT_HOST}:{port}/v1",
+        "store": cfg["store"],
+        "store_default": OLLAMA_STORE_DEFAULT,
+        "store_gb": 0.0,
+        "running": False,
+        "pid": None,
+        "models": [],
+        "model_count": 0,
+        "context_default": cfg["context"],
+        "launch_agent": os.path.exists(OLLAMA_LAUNCH_AGENT),
+    }
+    if not exe:
+        return info
+    pid = ollama_pid(port)
+    if pid:
+        try:
+            os.kill(pid, 0)
+            info["running"] = True
+            info["pid"] = pid
+        except Exception:
+            info["running"] = False
+    info["store_gb"] = ollama_store_gb(cfg["store"])
+    if info["running"] and with_models:
+        info["models"] = ollama_models(port)
+        info["model_count"] = len(info["models"])
+    return info
+
+def ollama_start(port=None, store=None, context=None, wait_seconds=25):
+    """Start the daemon if it is not already up. Returns a status dict."""
+    cfg = ollama_settings()
+    port = int(port or cfg["port"])
+    store = store or cfg["store"]
+    exe = ollama_bin()
+    if not exe:
+        return {"ok": False, "error": "ollama is not installed"}
+    status = ollama_status(port, with_models=False)
+    if status.get("running"):
+        return {"ok": True, "adopted": True, "pid": status.get("pid"), "port": port,
+                "message": f"Using the Ollama daemon already listening on port {port}"
+                            + (" (managed by launchd)" if status.get("launch_agent") else "")}
+    os.makedirs(OLLAMA_PID_DIR, exist_ok=True)
+    os.makedirs(OLLAMA_LOG_DIR, exist_ok=True)
+    if store:
+        os.makedirs(store, exist_ok=True)
+    log_path = os.path.join(OLLAMA_LOG_DIR, f"ollama_{port}.log")
+    env = dict(os.environ)
+    env["OLLAMA_HOST"] = f"{OLLAMA_DEFAULT_HOST}:{port}"
+    if store:
+        env["OLLAMA_MODELS"] = store
+    ctx = int(context if context is not None else cfg["context"] or 0)
+    if ctx > 0:
+        env["OLLAMA_CONTEXT_LENGTH"] = str(ctx)
+    try:
+        with open(log_path, "ab", buffering=0) as log:
+            proc = subprocess.Popen([exe, "serve"], stdout=log, stderr=log, env=env,
+                                    start_new_session=True)
+    except Exception as exc:
+        return {"ok": False, "error": f"could not start ollama: {exc}"}
+    try:
+        with open(os.path.join(OLLAMA_PID_DIR, f"ollama_{port}.pid"), "w") as fh:
+            fh.write(str(proc.pid))
+    except Exception:
+        pass
+    deadline = time.time() + wait_seconds
+    while time.time() < deadline:
+        try:
+            _ollama_http("/api/tags", port=port, timeout=1.0)
+            return {"ok": True, "adopted": False, "pid": proc.pid, "port": port,
+                    "message": f"Ollama listening on port {port}, store {store}"}
+        except Exception:
+            if proc.poll() is not None:
+                return {"ok": False, "error": f"ollama exited (see {log_path})"}
+            time.sleep(0.5)
+    return {"ok": False, "error": f"ollama did not answer on port {port} within {wait_seconds}s"}
+
+def ollama_stop(port=None):
+    """Stop a daemon this app started. A launchd-managed daemon is left alone."""
+    cfg = ollama_settings()
+    port = int(port or cfg["port"])
+    pid_file = os.path.join(OLLAMA_PID_DIR, f"ollama_{port}.pid")
+    try:
+        with open(pid_file) as fh:
+            pid = int(fh.read().strip())
+    except Exception:
+        pid = None
+    if not pid:
+        return {"ok": False, "error": "no daemon started by this app on that port"
+                                      + (" (launchd owns it — unload the agent to stop it)"
+                                         if os.path.exists(OLLAMA_LAUNCH_AGENT) else "")}
+    try:
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(40):
+            time.sleep(0.1)
+            try:
+                os.kill(pid, 0)
+            except Exception:
+                break
+        else:
+            os.kill(pid, signal.SIGKILL)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    try:
+        os.unlink(pid_file)
+    except Exception:
+        pass
+    return {"ok": True, "message": f"Stopped Ollama on port {port}"}
+
+def ollama_model_tag(path_or_name):
+    """Turn a GGUF path or repo name into a usable Ollama tag."""
+    base = os.path.basename(str(path_or_name)).replace(".gguf", "")
+    base = base.lower()
+    base = re.sub(r"[^a-z0-9._-]+", "-", base).strip("-.")
+    return (base or "local-model") + ":latest"
+
+def ollama_import(gguf_path, name=None, port=None, wait_seconds=180):
+    """Create an Ollama model from a local GGUF file.
+
+    Ollama copies the file into its blob store (deduplicated by digest), so this
+    can double the disk cost of the file. The Modelfile pins num_ctx to the
+    configured context so a harness prompt is not silently truncated.
+    """
+    exe = ollama_bin()
+    if not exe:
+        return {"ok": False, "error": "ollama is not installed"}
+    if not os.path.isfile(gguf_path):
+        return {"ok": False, "error": f"no such file: {gguf_path}"}
+    cfg = ollama_settings()
+    tag = name or ollama_model_tag(gguf_path)
+    modelfile = f"FROM {gguf_path}\n"
+    if cfg["context"] > 0:
+        modelfile += f"PARAMETER num_ctx {cfg['context']}\n"
+    env = dict(os.environ)
+    env["OLLAMA_HOST"] = f"{OLLAMA_DEFAULT_HOST}:{int(port or cfg['port'])}"
+    if cfg["store"]:
+        env["OLLAMA_MODELS"] = cfg["store"]
+    # `ollama create -f -` ignores stdin, so the Modelfile has to be a real file.
+    tmpdir = tempfile.mkdtemp(prefix="ollama_import_")
+    modelfile_path = os.path.join(tmpdir, "Modelfile")
+    try:
+        with open(modelfile_path, "w") as fh:
+            fh.write(modelfile)
+        out = subprocess.run([exe, "create", tag, "-f", modelfile_path], text=True,
+                             capture_output=True, env=env, timeout=wait_seconds)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    if out.returncode != 0:
+        return {"ok": False, "error": (out.stderr or out.stdout or "ollama create failed").strip()[:400]}
+    return {"ok": True, "tag": tag, "message": f"Imported as {tag}",
+            "output": (out.stdout or "").strip()[-400:]}
+
+def local_gguf_files(model_dir):
+    """The .gguf files inside one downloaded model snapshot (usually exactly one)."""
+    out = []
+    try:
+        for name in sorted(os.listdir(model_dir)):
+            if name.lower().endswith(".gguf"):
+                full = os.path.join(model_dir, name)
+                try:
+                    size = os.path.getsize(full)
+                except Exception:
+                    size = 0
+                out.append({"path": full, "name": name, "size_gb": round(size / (1024 ** 3), 2)})
+    except Exception:
+        return []
+    return out
+
+def ollama_engine_for(model_name_or_path):
+    """'ollama' for GGUF files and Ollama tags, otherwise 'mlx'."""
+    name = str(model_name_or_path or "")
+    if name.lower().endswith(".gguf"):
+        return "ollama"
+    if re.match(r"^[\w.-]+:[\w.-]+$", name) and "/" not in name:
+        return "ollama"
+    return "mlx"
+
+def ollama_harness_models(port=None):
+    """Models to advertise to the coding tools: id + real context window."""
+    cfg = ollama_settings()
+    out = []
+    for m in ollama_models(port=port):
+        ctx = ollama_context_length(m["id"], port=port) or cfg["context"] or 8192
+        out.append({
+            "id": m["id"],
+            "contextWindow": int(ctx),
+            "maxTokens": output_token_budget(m["id"]),
+            "size_gb": m.get("size_gb"),
+            "family": m.get("family"),
+            "is_vision": bool(re.search(r"vl|vision|llava|qwen2\.5vl", m["id"], re.I)),
+        })
+    return out
 
 STORAGE_FILE = os.path.expanduser("~/.mlx_pids/storage.json")
 LIBRARY_DIRNAME = "MLX-Models"
@@ -1325,7 +1725,7 @@ def hub_for_model(model_name):
                 break
     return candidates[0] if candidates else ""
 
-def get_download_cmd(repo_id, subfolder="", revision="", cache_dir=""):
+def get_download_cmd(repo_id, subfolder="", revision="", cache_dir="", include=None):
     """Finds available Hugging Face download CLI tool (hf, huggingface-cli, or uvx fallback)."""
     import shutil
     hf_path = shutil.which("hf")
@@ -1348,6 +1748,8 @@ def get_download_cmd(repo_id, subfolder="", revision="", cache_dir=""):
 
     if subfolder:
         cmd.extend(["--include", f"{subfolder}/*"])
+    for pattern in (include or []):
+        cmd.extend(["--include", pattern])
     if revision and revision != "main":
         cmd.extend(["--revision", revision])
     if cache_dir:
@@ -1409,6 +1811,38 @@ def parse_hf_identifier(input_str, explicit_subfolder=""):
         "display_name": display_name,
         "download_id": download_id
     }
+
+def hf_repo_gguf_files(repo_id, revision="main", timeout=12):
+    """List the .gguf files in a repo with their sizes, smallest quant names last.
+
+    A GGUF repo usually holds half a dozen quants; downloading the whole thing would
+    pull 100+ GB, so the UI asks which file to fetch and passes it through as an
+    --include pattern.
+    """
+    repo_id = (repo_id or "").strip().strip("/")
+    if not repo_id:
+        return []
+    url = (f"https://huggingface.co/api/models/{repo_id}/tree/"
+           f"{urllib.parse.quote(revision or 'main')}?recursive=true")
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    out = []
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception:
+        return []
+    for item in data or []:
+        path = item.get("path") or ""
+        if not path.lower().endswith(".gguf") or item.get("type") != "file":
+            continue
+        size = item.get("size") or (item.get("lfs") or {}).get("size") or 0
+        out.append({
+            "path": path,
+            "size_gb": round(size / (1024 ** 3), 2),
+            "quant": _detect_quant_label(path) or "",
+        })
+    out.sort(key=lambda f: (f["size_gb"], f["path"]))
+    return out
 
 def get_repo_files_size(repo_id, subfolder=""):
     cache_key = f"{repo_id}:{subfolder}" if subfolder else repo_id
@@ -1619,6 +2053,165 @@ def is_vision_model(model_path_or_id, config_dict=None):
         return False
     return False
 
+OLLAMA_DSH_PROVIDER = "ollama-local"
+
+def sync_dsh_ollama(provider_id=OLLAMA_DSH_PROVIDER, patch_path=None, dry_run=False, port=None):
+    """Add or refresh an Ollama provider inside the DeepSeek Harness patch.
+
+    A DSH provider carries one baseURL, so Ollama models cannot live under the MLX
+    provider: the daemon answers on its own port. The block is rewritten in place,
+    and only its models list changes on repeat runs.
+    """
+    path = patch_path or dsh_patch_path()
+    if not os.path.exists(path):
+        return {"ok": False, "error": "no DeepSeek Harness profile at " + path, "patch": path}
+    cfg = ollama_settings()
+    port = int(port or cfg["port"])
+    models = []
+    try:
+        models = ollama_harness_models(port=port)
+    except Exception:
+        models = []
+    raw = open(path).read().splitlines()
+    body = ["        displayName: Ollama (this Mac)",
+            "        api: openai-completions",
+            "        baseURL: http://127.0.0.1:%d/v1" % port]
+    if models:
+        body.append("        models:")
+        for m in models:
+            body.append("          - id: %s" % m["id"])
+            body.append("            name: %s" % (m["id"] + " (Ollama)"))
+            body.append("            contextWindow: %d" % int(m["contextWindow"]))
+            body.append("            maxTokens: %d" % int(m["maxTokens"]))
+            if m.get("is_vision"):
+                body.append("            input: [ text, image ]")
+    else:
+        body.append("        models: []")
+    body.append("        apiKeyEnv: OLLAMA_LOCAL_API_KEY")
+
+    start_re = re.compile(r"^ {6}" + re.escape(provider_id) + r":\s*$")
+    start = next((i for i, l in enumerate(raw) if start_re.match(l)), None)
+    if start is None:
+        prov_idx = next((i for i, l in enumerate(raw) if l.strip() == "providers:"
+                         and re.match(r"^ {4}providers:", l)), None)
+        if prov_idx is None:
+            return {"ok": False, "error": "no providers: block in " + path, "patch": path}
+        ins = None
+        for j in range(prov_idx + 1, len(raw)):
+            if not raw[j].strip() or raw[j].startswith("#"):
+                continue
+            if re.match(r"^ {0,4}\S", raw[j]) or raw[j].startswith("- "):
+                ins = j
+                break
+            ins = j + 1
+        if ins is None:
+            ins = len(raw)
+        new = raw[:ins] + ["      %s:" % provider_id] + body + raw[ins:]
+        entries_note = "inserted"
+    else:
+        end = len(raw)
+        for j in range(start + 1, len(raw)):
+            if raw[j].strip() and not raw[j].startswith(" "):
+                end = j
+                break
+            if re.match(r"^ {6}\S", raw[j]):
+                end = j
+                break
+        new = raw[:start] + ["      %s:" % provider_id] + body + raw[end:]
+        entries_note = "updated"
+    changed = new != raw
+    result = {"ok": True, "patch": path, "provider": provider_id, "changed": changed,
+              "models": [m["id"] for m in models], "action": entries_note,
+              "base_url": "http://127.0.0.1:%d/v1" % port}
+    if dry_run or not changed:
+        return result
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    try:
+        shutil.copy2(path, path + ".bak-" + stamp)
+        with open(path, "w") as f:
+            f.write("\n".join(new) + "\n")
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "patch": path}
+    result["backup"] = path + ".bak-" + stamp
+    return result
+
+def sync_pi_ollama():
+    """Write only the Ollama provider into Pi Coder and OpenCode, leaving MyMac alone."""
+    cfg = ollama_settings()
+    port = int(cfg["port"])
+    models = ollama_harness_models(port=port)
+    done = []
+
+    pi_models_file = os.path.expanduser("~/.pi/agent/models.json")
+    if os.path.exists(pi_models_file):
+        try:
+            with open(pi_models_file, "r") as f:
+                md = json.load(f)
+            md.setdefault("providers", {})
+            if models:
+                md["providers"]["Ollama"] = {
+                    "baseUrl": f"http://127.0.0.1:{port}/v1",
+                    "api": "openai-completions",
+                    "apiKey": "local",
+                    "name": "Ollama",
+                    "compat": {"supportsDeveloperRole": False, "supportsReasoningEffort": False},
+                    "models": [{
+                        "id": m["id"],
+                        "name": f"{m['id']} (Ollama)",
+                        "reasoning": False,
+                        "input": ["text", "image"] if m.get("is_vision") else ["text"],
+                        "contextWindow": m["contextWindow"],
+                        "maxTokens": m["maxTokens"],
+                        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+                    } for m in models],
+                }
+            else:
+                md["providers"].pop("Ollama", None)
+            with open(pi_models_file, "w") as f:
+                json.dump(md, f, indent=2)
+            done.append("pi")
+        except Exception:
+            pass
+
+    for opf in (os.path.expanduser("~/.config/opencode/opencode.jsonc"),
+                os.path.expanduser("~/opencode.jsonc")):
+        if not os.path.exists(opf):
+            continue
+        try:
+            with open(opf, "r") as f:
+                opd = json.load(f)
+            opd.setdefault("provider", {})
+            if models:
+                opd["provider"]["Ollama"] = {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": "Ollama",
+                    "options": {"baseURL": f"http://127.0.0.1:{port}/v1"},
+                    "models": {m["id"]: {"name": f"{m['id']} (Ollama)"} for m in models},
+                }
+            else:
+                opd["provider"].pop("Ollama", None)
+            with open(opf, "w") as f:
+                json.dump(opd, f, indent=2)
+            done.append("opencode")
+        except Exception:
+            pass
+    return done
+
+def sync_ollama_agents(port=None, patch_path=None):
+    """Write Ollama into every agent config that can take it. Never raises."""
+    cfg = ollama_settings()
+    port = int(port or cfg["port"])
+    out = {"ok": True, "port": port, "pi": None, "dsh": None}
+    try:
+        out["pi"] = ",".join(sync_pi_ollama()) or "no configs found"
+    except Exception as exc:
+        out["pi"] = "error: %s" % exc
+    try:
+        out["dsh"] = sync_dsh_ollama(patch_path=patch_path, port=port)
+    except Exception as exc:
+        out["dsh"] = {"ok": False, "error": str(exc)}
+    return out
+
 def sync_pi_and_opencode(active_model, port=9999, is_vision=False):
     """Automatically updates Pi Code and OpenCode configurations to auto-detect the active MLX model under provider 'MyMac'."""
     try:
@@ -1686,6 +2279,35 @@ def sync_pi_and_opencode(active_model, port=9999, is_vision=False):
                         }
                     ]
                 }
+                try:
+                    ol_models = ollama_harness_models()
+                except Exception:
+                    ol_models = []
+                if ol_models:
+                    ol_port = ollama_settings()["port"]
+                    md["providers"]["Ollama"] = {
+                        "baseUrl": f"http://127.0.0.1:{ol_port}/v1",
+                        "api": "openai-completions",
+                        "apiKey": "local",
+                        "name": "Ollama",
+                        "compat": {
+                            "supportsDeveloperRole": False,
+                            "supportsReasoningEffort": False
+                        },
+                        "models": [
+                            {
+                                "id": m["id"],
+                                "name": f"{m['id']} (Ollama)",
+                                "reasoning": False,
+                                "input": ["text", "image"] if m.get("is_vision") else ["text"],
+                                "contextWindow": m["contextWindow"],
+                                "maxTokens": m["maxTokens"],
+                                "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
+                            } for m in ol_models
+                        ]
+                    }
+                else:
+                    md["providers"].pop("Ollama", None)
                 with open(pi_models_file, "w") as f:
                     json.dump(md, f, indent=2)
             except Exception:
@@ -2823,6 +3445,9 @@ def _detect_quant_label(repo_id, bits=None):
             pass
     rid = (repo_id or "").lower()
     m = re.search(r"(?<![0-9])([2-8])[ ._-]?bit", rid)
+    if not m:
+        # GGUF naming: Q4_K_M, IQ3_XS, Q8_0, q5_k_s
+        m = re.search(r"(?<![a-z0-9])i?q([2-8])(?![0-9])", rid)
     if m:
         return f"{m.group(1)}-bit"
     if "fp32" in rid:
@@ -3085,6 +3710,8 @@ def search_hf_api(query, limit=50, sort="downloads", direction=-1, filter_tag="m
     params = [f"search={q}", f"limit={fetch_limit}", f"sort={api_sort}", f"direction={direction}"]
     if "mlx" in tags:
         params.append("filter=mlx")
+    if "gguf" in tags:
+        params.append("filter=gguf")
     if "vision" in tags:
         params.append("pipeline_tag=image-text-to-text")
     url = "https://huggingface.co/api/models?" + "&".join(params)

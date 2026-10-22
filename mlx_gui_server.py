@@ -146,7 +146,13 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             live_port = servers[0].get("port") if servers else config.get("default_port")
             self.send_json({"servers": servers, "stats": stats, "downloads": downloads, "config": config,
                             "stream_guard": mlx_helper.stream_guard_status(),
-                            "prefix_cache": mlx_helper.apc_status(live_port)})
+                            "prefix_cache": mlx_helper.apc_status(live_port),
+                            "ollama": mlx_helper.ollama_status(with_models=True)})
+        elif path == "/api/gguf/files":
+            repo_id = query.get("repo_id", [""])[0]
+            self.send_json({"files": mlx_helper.hf_repo_gguf_files(repo_id)})
+        elif path == "/api/ollama":
+            self.send_json({"ollama": mlx_helper.ollama_status()})
         elif path == "/api/config":
             config = mlx_helper.load_global_settings()
             self.send_json(config)
@@ -154,6 +160,30 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             models = mlx_helper.find_local_models()
             for m in models:
                 m["context_window"] = mlx_helper.model_context_window(m.get("path") or m.get("name") or "")
+                ggufs = mlx_helper.local_gguf_files(m.get("path") or "") if m.get("path") else []
+                is_gguf = str(m.get("name", "")).lower().endswith(".gguf") or bool(ggufs)
+                m["engine"] = "ollama" if is_gguf else "mlx"
+                if ggufs:
+                    m["gguf_files"] = ggufs
+                    m["gguf_path"] = ggufs[0]["path"]
+                    m["is_vision"] = False
+                    m["arch_tag"] = "gguf"
+            try:
+                ollama = mlx_helper.ollama_status()
+            except Exception:
+                ollama = {}
+            for om in (ollama.get("models") or []):
+                models.append({
+                    "name": om["id"],
+                    "path": "",
+                    "size_gb": om.get("size_gb", 0),
+                    "size": f"{om.get('size_gb', 0):.1f} GB",
+                    "engine": "ollama",
+                    "is_vision": bool(om.get("family", "").lower().startswith(("qwen2", "qwen3", "llava", "llama4")) and "vl" in om["id"].lower()),
+                    "supported": True,
+                    "arch_tag": "ollama",
+                    "ollama": True,
+                })
             self.send_json({"models": models, "context_cap": mlx_helper.context_window_cap()})
         elif path == "/api/memory_processes":
             stats = mlx_helper.get_system_stats()
@@ -469,6 +499,28 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                 "is_vision": is_vis
             })
 
+        elif path == "/api/ollama/start":
+            result = mlx_helper.ollama_start()
+            if result.get("ok"):
+                try:
+                    mlx_helper.sync_ollama_agents()
+                except Exception:
+                    pass
+            self.send_json(result)
+        elif path == "/api/ollama/stop":
+            self.send_json(mlx_helper.ollama_stop())
+        elif path == "/api/ollama/sync":
+            self.send_json(mlx_helper.sync_ollama_agents())
+        elif path == "/api/ollama/import":
+            gguf = (payload.get("path") or "").strip()
+            name = (payload.get("name") or "").strip() or None
+            result = mlx_helper.ollama_import(gguf, name=name)
+            if result.get("ok"):
+                try:
+                    mlx_helper.sync_ollama_agents()
+                except Exception:
+                    pass
+            self.send_json(result)
         elif path == "/api/stop":
             pid = payload.get("pid")
             port = payload.get("port")
@@ -649,6 +701,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
         elif path == "/api/download":
             raw_repo = payload.get("repo_id", "")
             explicit_subfolder = payload.get("subfolder", "")
+            include_patterns = payload.get("include") or []
             requested_drive = (payload.get("drive") or "").strip()
             if not raw_repo:
                 self.send_json({"error": "No repo_id specified"}, 400)
@@ -699,7 +752,8 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             env = mlx_helper.get_mlx_env()
             hub_dir = hub if drive and drive.get("connected") else ""
             cmd = mlx_helper.get_download_cmd(repo_id, subfolder=subfolder, revision=revision,
-                                             cache_dir=hub_dir)
+                                             cache_dir=hub_dir,
+                                             include=[str(p) for p in include_patterns] or None)
 
             # Single LFS streams run at ~75 KB/s here; parallelise big blobs first.
             cfg = mlx_helper.load_global_settings()
@@ -811,7 +865,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.10.3 (MLX Controller)</title>
+  <title>macOS MLX Control Center v0.11.0 (MLX + Ollama)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1252,7 +1306,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.10.3 (MLX Controller)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.11.0 (MLX + Ollama)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
@@ -1377,6 +1431,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div class="chip active" id="chip-mlx" onclick="toggleTag('mlx')" title="Click to combine with the other filters">⚡ MLX Models</div>
       <div class="chip" id="chip-vision" onclick="toggleTag('vision')" title="Combine freely: MLX + Vision + 8-bit + Code">👁️ Vision & Multimodal</div>
       <div class="chip" id="chip-code" onclick="toggleTag('code')" title="Combine freely with MLX, Vision and Quant">💻 Code Models</div>
+      <div class="chip" id="chip-gguf" onclick="toggleTag('gguf')" title="GGUF repositories — picked up by Ollama, not by MLX">🦙 GGUF (Ollama)</div>
       <div class="chip" id="chip-all" onclick="clearTags()" title="Clear every filter and search all of Hugging Face">🌐 All HF Repos</div>
       <span id="filterHint" style="font-size: 11px; color: var(--text-muted); align-self: center; margin-left: 2px;"></span>
 
@@ -1555,6 +1610,28 @@ INDEX_HTML = """<!DOCTYPE html>
     </div>
     <button class="btn btn-primary" style="padding: 8px 18px; font-size: 13px;" onclick="runAiComparison()">🤖 Compare Selected Models with AI</button>
     <button class="btn btn-secondary" style="padding: 8px 14px; font-size: 12px;" onclick="clearCompareSelection()">🧹 Clear Checkmarks</button>
+  </div>
+
+  <!-- OLLAMA ENGINE -->
+  <div id="ollamaModal" class="modal-overlay">
+    <div class="modal" style="max-width: 760px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+        <div class="modal-header" style="margin-bottom: 0;">🦙 Ollama Engine</div>
+        <button class="btn btn-secondary" style="padding: 4px 10px; font-size: 12px;" onclick="document.getElementById('ollamaModal').classList.remove('active')">✕ Close</button>
+      </div>
+      <div id="ollamaBody" style="font-size: 13px; color: var(--text-muted);">Loading...</div>
+    </div>
+  </div>
+
+  <!-- GGUF FILE PICKER (one quant, not the whole repo) -->
+  <div id="ggufModal" class="modal-overlay">
+    <div class="modal" style="max-width: 680px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+        <div class="modal-header" style="margin-bottom: 0;" id="ggufModalTitle">Download a GGUF</div>
+        <button class="btn btn-secondary" style="padding: 4px 10px; font-size: 12px;" onclick="document.getElementById('ggufModal').classList.remove('active')">✕ Close</button>
+      </div>
+      <div id="ggufBody" style="font-size: 13px; color: var(--text-muted);">Loading files...</div>
+    </div>
   </div>
 
   <!-- QUANTIZATION SELECTION MODAL FOR MULTI-QUANT REPOSITORIES -->
@@ -2894,6 +2971,22 @@ INDEX_HTML = """<!DOCTYPE html>
             </div>`;
         }
 
+        // Ollama is a daemon on its own port, so it is reported next to — not inside —
+        // the MLX server list.
+        const ol = data.ollama || {};
+        let ollamaPill = '';
+        if (ol.installed) {
+          const olOn = !!ol.running;
+          const olbits = [];
+          if (olOn && ol.model_count) olbits.push(ol.model_count + ' model(s)');
+          if (olOn && ol.store_gb) olbits.push(ol.store_gb + ' GB store');
+          const oldetail = olbits.length ? ' &middot; ' + olbits.join(' &middot; ') : '';
+          ollamaPill = `
+            <div class="status-pill ${olOn ? 'ready' : 'none'}" style="cursor: pointer;" onclick="openOllamaModal()" title="Ollama daemon on port ${ol.port || 11434}. Click to manage models, start or stop the daemon, and sync Pi / DeepSeek Harness.">
+              <span class="status-dot ${olOn ? '' : 'pulse'}"></span> 🦙 Ollama ${olOn ? 'on :' + (ol.port || 11434) : 'stopped'}${oldetail}
+            </div>`;
+        }
+
         if (activeServers.length > 0) {
           const readyCount = activeServers.filter(s => s.status === 'READY').length;
           statusHeader.innerHTML = `
@@ -2902,6 +2995,7 @@ INDEX_HTML = """<!DOCTYPE html>
             </div>`;
           statusHeader.innerHTML += guardPill;
           statusHeader.innerHTML += pcPill;
+          statusHeader.innerHTML += ollamaPill;
           
           serverContainer.innerHTML = '';
           activeServers.forEach(s => {
@@ -2943,6 +3037,7 @@ INDEX_HTML = """<!DOCTYPE html>
             </div>`;
           statusHeader.innerHTML += guardPill;
           statusHeader.innerHTML += pcPill;
+          statusHeader.innerHTML += ollamaPill;
           serverContainer.innerHTML = `<div class="card" style="grid-column: 1 / -1; width: 100%; text-align: center; color: var(--text-muted); padding: 18px;">No model currently running. Click "Start Model" on any downloaded model below!</div>`;
         }
 
@@ -3032,6 +3127,12 @@ INDEX_HTML = """<!DOCTYPE html>
         const ramBadge = getRamBadge(m.size_gb ? (m.size_gb * 1.08 + 2.0) : 0, currentUsableRam, true);
         const isChecked = selectedForCompare.has(m.name) ? 'checked' : '';
         const hfUrl = m.base_name ? `https://huggingface.co/${m.base_name}${m.subfolder ? '/tree/main/' + m.subfolder : ''}` : `https://huggingface.co/${m.name}`;
+        // MLX models start a server; a GGUF has to be handed to Ollama first.
+        const primaryAction = m.ollama
+          ? `<button class="btn btn-secondary" onclick="openOllamaModal()">🦙 Managed by Ollama</button>`
+          : (m.engine === 'ollama' || /\\.gguf$/i.test(m.name)
+              ? `<button class="btn btn-primary" onclick='importGguf(${JSON.stringify(m.gguf_path || m.path || '')}, ${JSON.stringify(m.name)})'>🦙 Import to Ollama</button>`
+              : `<button class="btn ${isRunning ? 'btn-secondary' : 'btn-primary'}" onclick="openLaunchModal('${m.name}')">${isRunning ? `✓ Active on Port ${runningServer.port}` : '🚀 Start Model'}</button>`);
 
         const fastSwapCard = `
           <div class="card">
@@ -3053,9 +3154,7 @@ INDEX_HTML = """<!DOCTYPE html>
               </div>
             </div>
             <div class="card-actions">
-              <button class="btn ${isRunning ? 'btn-secondary' : 'btn-primary'}" onclick="openLaunchModal('${m.name}')">
-                ${isRunning ? `✓ Active on Port ${runningServer.port}` : '🚀 Start Model'}
-              </button>
+              ${primaryAction}
               <a href="${hfUrl}" target="_blank" class="btn btn-secondary" style="padding: 9px 12px; font-size: 12px;">🔗 HF Page</a>
             </div>
           </div>`;
@@ -3083,7 +3182,7 @@ INDEX_HTML = """<!DOCTYPE html>
               </div>
             </div>
             <div class="card-actions">
-              <button class="btn btn-primary" onclick="openLaunchModal('${m.name}')">🚀 Start Model</button>
+              ${primaryAction}
               <a href="${hfUrl}" target="_blank" class="btn btn-secondary" style="padding: 9px 12px; font-size: 12px;">🔗 HF Page</a>
               <button class="btn btn-danger" onclick="deleteModel('${m.delete_target}')">🗑️ Delete</button>
             </div>
@@ -3091,6 +3190,139 @@ INDEX_HTML = """<!DOCTYPE html>
         modelsGrid.innerHTML += modelCard;
       });
       applyViewMode();
+    }
+
+    // ---- Ollama engine + GGUF ------------------------------------------------
+    async function openOllamaModal() {
+      const el = document.getElementById('ollamaModal');
+      if (el) el.classList.add('active');
+      await refreshOllamaModal();
+    }
+
+    async function refreshOllamaModal() {
+      const body = document.getElementById('ollamaBody');
+      if (!body) return;
+      body.innerHTML = 'Loading...';
+      try {
+        const res = await fetch('/api/ollama');
+        const data = await res.json();
+        const o = data.ollama || {};
+        if (!o.installed) {
+          body.innerHTML = `<p>Ollama was not found on this Mac. Install it from
+            <a href="https://ollama.com/download" target="_blank" style="color:#818cf8;">ollama.com</a>,
+            then reopen this panel.</p>`;
+          return;
+        }
+        const running = !!o.running;
+        const rows = (o.models || []).map(m => `
+          <tr>
+            <td style="padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.06); color:#f3f4f6;">${m.id}</td>
+            <td style="padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.06);">${m.size_gb ? m.size_gb + ' GB' : '-'}</td>
+            <td style="padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.06);">${m.family || '-'}</td>
+            <td style="padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.06);">${m.parameter_size || '-'} ${m.quantization || ''}</td>
+          </tr>`).join('');
+        body.innerHTML = `
+          <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px;">
+            <div class="status-pill ${running ? 'ready' : 'none'}"><span class="status-dot ${running ? '' : 'pulse'}"></span> ${running ? 'Running on :' + o.port : 'Not running'}</div>
+            <div class="status-pill none">Version ${o.version || '?'}</div>
+            <div class="status-pill none">Store ${o.store_gb || 0} GB</div>
+            ${o.launch_agent ? '<div class="status-pill none">launchd-managed</div>' : ''}
+          </div>
+          <div style="font-size:12px; margin-bottom:6px;">Store: <code style="color:#f3f4f6;">${o.store}</code></div>
+          ${o.launch_agent ? `<div style="font-size:12px; margin-bottom:6px; color:#fbbf24;">This daemon is kept alive by ${o.launch_agent}. Stopping it here only works until launchd restarts it.</div>` : ''}
+          <div style="display:flex; gap:8px; flex-wrap:wrap; margin:12px 0;">
+            <button class="btn btn-primary" onclick="ollamaAction('/api/ollama/start')">${running ? '↻ Refresh' : '▶ Start daemon'}</button>
+            <button class="btn btn-secondary" onclick="ollamaAction('/api/ollama/stop')">⏹ Stop daemon</button>
+            <button class="btn btn-secondary" onclick="ollamaAction('/api/ollama/sync')">↔ Sync to Pi / DSH</button>
+          </div>
+          ${(o.models || []).length ? `
+          <table style="width:100%; border-collapse:collapse; font-size:12px;">
+            <thead><tr style="text-align:left; color:#9ca3af;">
+              <th style="padding:6px 8px;">Model tag</th><th style="padding:6px 8px;">Size</th>
+              <th style="padding:6px 8px;">Family</th><th style="padding:6px 8px;">Params / quant</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>` : '<p style="margin-top:12px;">No models in the store yet. Search Hugging Face with the 🦙 GGUF filter, download a .gguf file, then press “Import to Ollama”.</p>'}
+          <div style="font-size:11px; margin-top:12px; color:#6b7280;">In your agent, pick provider <strong>Ollama</strong> and the model tag above.</div>`;
+      } catch (e) {
+        body.innerHTML = 'Could not read Ollama status: ' + e;
+      }
+    }
+
+    async function ollamaAction(path) {
+      try {
+        const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const d = await res.json();
+        if (d && d.ok === false && d.error) alert('Ollama: ' + d.error);
+        if (path === '/api/ollama/sync' && d && d.ok) alert('Agent configs updated for Ollama.');
+      } catch (e) {
+        alert('Ollama request failed: ' + e);
+      }
+      await refreshOllamaModal();
+      loadStatus();
+    }
+
+    let ggufRepo = '';
+    async function openGgufPicker(repoId) {
+      ggufRepo = repoId;
+      const title = document.getElementById('ggufModalTitle');
+      const body = document.getElementById('ggufBody');
+      if (title) title.innerText = '🦙 ' + repoId;
+      if (body) body.innerText = 'Reading the file list...';
+      const modal = document.getElementById('ggufModal');
+      if (modal) modal.classList.add('active');
+      try {
+        const res = await fetch('/api/gguf/files?repo_id=' + encodeURIComponent(repoId));
+        const d = await res.json();
+        const files = d.files || [];
+        if (!files.length) { body.innerHTML = '<p>No .gguf files in this repo.</p>'; return; }
+        body.innerHTML = `<p style="margin-bottom:10px;">Pick one file - a GGUF repo usually holds several quants.</p>
+          <table style="width:100%; border-collapse:collapse; font-size:12px;">
+          ${files.map(f => `<tr>
+            <td style="padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.06); color:#f3f4f6;">${f.path}</td>
+            <td style="padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.06);">${f.size_gb} GB</td>
+            <td style="padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.06); text-align:right;">
+              <button class="btn btn-primary" style="padding:6px 12px; font-size:12px;" onclick='downloadGguf(${JSON.stringify(f.path)}, ${f.size_gb})'>💾 Download</button>
+            </td></tr>`).join('')}
+          </table>`;
+      } catch (e) {
+        body.innerHTML = 'Could not list files: ' + e;
+      }
+    }
+
+    async function downloadGguf(path, sizeGb) {
+      try {
+        const res = await fetch('/api/download', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repo_id: ggufRepo, include: [path] })
+        });
+        const d = await res.json();
+        if (d.error) { alert('Download: ' + d.error); return; }
+        document.getElementById('ggufModal').classList.remove('active');
+        loadStatus();
+      } catch (e) {
+        alert('Download failed: ' + e);
+      }
+    }
+
+    async function importGguf(path, name) {
+      if (!path) { alert('No local file path for this model.'); return; }
+      const base = (name || path.split('/').pop()).replace(/\\.gguf$/i, '');
+      const suggested = base.toLowerCase().replace(/[^a-z0-9._:-]+/g, '-').replace(/^-+|-+$/g, '');
+      const tag = prompt('Name this model in Ollama (a tag like qwen2.5-coder:14b-q4):', suggested);
+      if (!tag) return;
+      try {
+        const res = await fetch('/api/ollama/import', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: path, name: tag })
+        });
+        const d = await res.json();
+        if (!d.ok) { alert('Import failed: ' + (d.error || 'unknown error')); return; }
+        alert('Imported as ' + (d.name || tag) + '. It is now in the Ollama store and synced to your agents.');
+        openOllamaModal();
+      } catch (e) {
+        alert('Import failed: ' + e);
+      }
     }
 
     async function loadModels() {
@@ -3123,7 +3355,7 @@ INDEX_HTML = """<!DOCTYPE html>
     }
 
     function syncChipState() {
-      ['mlx', 'vision', 'code'].forEach(t => {
+      ['mlx', 'vision', 'code', 'gguf'].forEach(t => {
         const el = document.getElementById('chip-' + t);
         if (el) el.classList.toggle('active', activeTags.has(t));
       });
@@ -3131,7 +3363,7 @@ INDEX_HTML = """<!DOCTYPE html>
       if (allChip) allChip.classList.toggle('active', activeTags.size === 0);
       const hint = document.getElementById('filterHint');
       if (hint) {
-        const parts = [...activeTags].map(t => t === 'mlx' ? 'MLX' : t === 'vision' ? 'Vision' : 'Code');
+        const parts = [...activeTags].map(t => t === 'mlx' ? 'MLX' : t === 'vision' ? 'Vision' : t === 'gguf' ? 'GGUF' : 'Code');
         const q = document.getElementById('quantSelect') ? document.getElementById('quantSelect').value : '';
         if (q) parts.push(q + '-bit');
         hint.innerText = parts.length ? 'AND: ' + parts.join(' + ') : '';
@@ -3340,6 +3572,7 @@ INDEX_HTML = """<!DOCTYPE html>
             <div class="card-actions">
               <button class="btn btn-primary" style="flex: 1;" title="Choose a drive, confirm, then download"
                       onclick="downloadRepo('${r.id}', '', { needed_gb: ${r.est_ram_gb ? Math.round(r.est_ram_gb * 0.8) : 0} })">💾 Download…</button>
+              ${(activeTags.has('gguf') || /gguf/i.test(r.id)) ? `<button class="btn btn-secondary" style="padding: 9px 12px; font-size: 12px;" onclick="openGgufPicker('${r.id}')">🦙 Pick GGUF file…</button>` : ''}
               <a href="${hfUrl}" target="_blank" class="btn btn-secondary" style="padding: 9px 12px; font-size: 12px;">🔗 HF Page</a>
             </div>
           </div>`;

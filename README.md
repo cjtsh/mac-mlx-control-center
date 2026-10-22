@@ -1,5 +1,5 @@
 
-# ⚡ macOS MLX Control Center `v0.10.3` (MLX Controller Edition)
+# ⚡ macOS MLX Control Center `v0.11.0` (MLX + Ollama Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -298,6 +298,38 @@ MLX_VLM_APC=0 ./mlx.sh start <model>   # launch without the cache
 python3 tests/test_prefix_cache.py     # 22 checks, no model download
 ```
 
+
+## 🦙 Ollama Engine + GGUF Models (New in v0.11.0)
+
+The control center now runs two kinds of local models and picks the engine from the model itself:
+
+| What you pick | Engine | Port |
+| --- | --- | --- |
+| An MLX repo (safetensors) | `mlx-lm` / `mlx-vlm`, one process per model | 9999 |
+| A GGUF file, or an Ollama tag | the Ollama daemon | 11434 |
+
+Ollama is a **daemon**: one process, one port, every model behind it, and the **model tag** is the identity instead of the port. That is why the dashboard reports it beside the MLX server list rather than inside it.
+
+### Getting a GGUF model
+1. **Search Hugging Face** → press **🦙 GGUF (Ollama)** (turn MLX off first if you want GGUF-only results).
+2. Press **🦙 Pick GGUF file…** on a result. A GGUF repo holds several quants — pick one, because downloading the repo would pull 100+ GB.
+3. When the file lands in the library, its card offers **🦙 Import to Ollama**. Give it a tag such as `qwen3-coder:30b-q4` and it is registered in the store with `ollama create`.
+
+> Importing **copies** the file into the Ollama store (about 2× disk for that model). `ollama pull` is the single-copy path when the model already exists upstream. The store lives at `~/.ollama/models` unless `ollama_store` says otherwise — and Ollama reads that setting only when the daemon starts.
+
+### The 🦙 Ollama pill
+Click it to see the daemon state, the store size, the model table, and to **Start / Stop** the daemon or **Sync to Pi / DSH**. Sync writes:
+
+* **Pi Coder** — provider `Ollama`, `baseURL http://127.0.0.1:11434/v1`, one entry per model tag using the context length Ollama reports for that model.
+* **DeepSeek Harness** — a second provider `ollama-local` in `cordis.patch.yml`. A DSH provider carries a single base URL, so Ollama cannot share the MLX provider. Restart DSH to load it.
+* **OpenCode** — the same provider block.
+
+In your agent, choose provider **Ollama** and the tag.
+
+### Worth knowing
+* **Context:** a harness cannot ask Ollama for a larger window per request, so the daemon's `OLLAMA_CONTEXT_LENGTH` is the real ceiling (`settings.json` → `ollama_context`, default 32768).
+* **launchd:** if the daemon was started by `~/Library/LaunchAgents/com.ollama.ollama.plist`, Stop only lasts until launchd restarts it — the panel says so.
+* **LAN exposure:** that same plist may set `OLLAMA_HOST=0.0.0.0`, which serves Ollama to your whole network. Use `127.0.0.1:11434` if you did not mean that.
 
 ## 🔄 Sync Installed Models into DeepSeek Harness (v0.8.4, vision fix in v0.8.9)
 
