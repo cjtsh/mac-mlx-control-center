@@ -9,6 +9,8 @@ echo "⚡ macOS MLX Control Center - 1-Click Launcher & Setup"
 echo "========================================================"
 
 TARGET_DIR="$HOME/mac-mlx-control-center"
+INSTALL_APP="/Applications/MLXController.app"
+CONFIG_DIR="$HOME/Library/Application Support/MLX Controller"
 LOG_DIR="$HOME/.mlx_logs"
 PID_DIR="$HOME/.mlx_pids"
 MODEL_DIR="$HOME/mlx_models"
@@ -49,35 +51,131 @@ fi
 cd "$TARGET_DIR"
 
 # 4. Set Execution Permissions & Sync Files
-chmod +x "$TARGET_DIR"/*.sh "$TARGET_DIR"/*.command "$TARGET_DIR"/mlx_gui_server.py 2>/dev/null || true
+chmod +x "$TARGET_DIR"/*.sh "$TARGET_DIR"/*.command "$TARGET_DIR"/mlx_gui_server.py "$TARGET_DIR"/desktop/build_app.sh 2>/dev/null || true
 cp "$TARGET_DIR/mlx_gui_server.py" "$HOME/mlx_gui_server.py" 2>/dev/null || true
 cp "$TARGET_DIR/mlx_helper.py" "$HOME/mlx_helper.py" 2>/dev/null || true
 cp "$TARGET_DIR/mlx.sh" "$HOME/mlx.sh" 2>/dev/null || true
 cp "$TARGET_DIR/mlx_helper.py" "$PID_DIR/mlx_helper.py" 2>/dev/null || true
 
-# 5. Stop any existing GUI server on port 9998
-lsof -t -i :9998 | xargs kill -9 2>/dev/null || true
-sleep 0.5
+# 5. Quit the old controller (if any) and stop the GUI gracefully
+quit_controller() {
+    if pgrep -x MLXController >/dev/null 2>&1; then
+        osascript -e 'tell application id "com.cjtsh.mlxcontroller" to quit' >/dev/null 2>&1 || true
+        for _ in {1..30}; do
+            pgrep -x MLXController >/dev/null 2>&1 || break
+            sleep 0.1
+        done
+    fi
+}
 
-# 6. Launch Server in Background
-echo "🚀 Starting MLX GUI Server on http://127.0.0.1:9998..."
-nohup "$PYTHON_BIN" "$TARGET_DIR/mlx_gui_server.py" >> "$LOG_DIR/server.log" 2>&1 &
+stop_existing_gui() {
+    quit_controller
+    local pid cmd
+    pid="$(/usr/sbin/lsof -nP -iTCP:9998 -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
+    [ -z "$pid" ] && return 0
+    cmd="$(/bin/ps -p "$pid" -o command= 2>/dev/null || true)"
+    case "$cmd" in
+        *mlx_gui_server.py*) ;;
+        *)
+            echo "❌ Port 9998 is in use by something other than the control center:"
+            echo "   $cmd"
+            echo "   Quit that app (or free the port) and run this installer again."
+            exit 1
+            ;;
+    esac
+    echo "🛑 Stopping the existing control center (PID $pid)…"
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in {1..30}; do
+        kill -0 "$pid" 2>/dev/null || return 0
+        sleep 0.2
+    done
+    kill -KILL "$pid" 2>/dev/null || true
+    sleep 0.2
+}
 
-# Wait for server port to open
-for i in {1..20}; do
-    if lsof -i :9998 >/dev/null 2>&1; then
+write_config() {
+    mkdir -p "$CONFIG_DIR"
+    MLX_REPO_PATH="$TARGET_DIR" MLX_PYTHON_PATH="$PYTHON_BIN" "$PYTHON_BIN" - <<'PY'
+import json
+import os
+import pathlib
+
+path = pathlib.Path.home() / "Library/Application Support/MLX Controller/config.json"
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps({
+    "repoPath": os.environ["MLX_REPO_PATH"],
+    "pythonPath": os.environ["MLX_PYTHON_PATH"],
+    "port": 9998,
+    "autoStart": True,
+    "stopOnQuit": True,
+}, indent=2) + "\n")
+PY
+}
+
+make_alias() {
+    osascript <<'APPLESCRIPT' >/dev/null 2>&1 || true
+tell application "Finder"
+    if exists alias file "MLX Controller" of desktop then
+        delete alias file "MLX Controller" of desktop
+    end if
+    set appAlias to make alias file to POSIX file "/Applications/MLXController.app" at desktop
+    set name of appAlias to "MLX Controller"
+end tell
+APPLESCRIPT
+    if [ ! -e "$HOME/Desktop/MLX Controller" ]; then
+        ln -sfn "$INSTALL_APP" "$HOME/Desktop/MLX Controller"
+    fi
+}
+
+stop_existing_gui
+
+# 6. Build and install the desktop controller
+if [ -x "$TARGET_DIR/desktop/build_app.sh" ] && command -v swiftc >/dev/null 2>&1; then
+    echo "🖥️  Building MLX Controller…"
+    MLX_REPO_PATH="$TARGET_DIR" PYTHON_BIN="$PYTHON_BIN" "$TARGET_DIR/desktop/build_app.sh" --install
+else
+    echo "🖥️  Downloading the prebuilt MLX Controller…"
+    TMP_DIR="$(mktemp -d)"
+    trap 'rm -rf "$TMP_DIR"' EXIT
+    URL="https://github.com/cjtsh/mac-mlx-control-center/releases/latest/download/MLXController.app.zip"
+    if ! curl -fL --retry 2 -o "$TMP_DIR/MLXController.app.zip" "$URL"; then
+        echo "❌ Could not download MLX Controller from $URL"
+        echo "   Install Xcode Command Line Tools (xcode-select --install) and run this installer again."
+        exit 1
+    fi
+    ditto -x -k "$TMP_DIR/MLXController.app.zip" "$TMP_DIR"
+    quit_controller
+    rm -rf "$INSTALL_APP"
+    mv "$TMP_DIR/MLXController.app" "$INSTALL_APP"
+    xattr -dr com.apple.quarantine "$INSTALL_APP" 2>/dev/null || true
+    codesign --force --deep --sign - "$INSTALL_APP" >/dev/null 2>&1 || true
+    write_config
+    make_alias
+fi
+
+# 7. Launch the controller and wait for the dashboard
+echo "🚀 Starting MLX Controller…"
+open "$INSTALL_APP"
+
+for _ in {1..80}; do
+    if curl -sf --max-time 1 http://127.0.0.1:9998/api/status >/dev/null 2>&1; then
         break
     fi
-    sleep 0.15
+    sleep 0.25
 done
 
-# 7. Open Web Dashboard
-echo "✓ Success! Opening macOS MLX Control Center in your browser..."
+if ! curl -sf --max-time 2 http://127.0.0.1:9998/api/status >/dev/null 2>&1; then
+    echo "❌ The dashboard did not start. Check:"
+    echo "   $HOME/Library/Logs/MLX Controller/server.log"
+    exit 1
+fi
+
 open "http://127.0.0.1:9998"
 
 echo ""
 echo "--------------------------------------------------------"
 echo "🎉 MLX Control Center is running at http://127.0.0.1:9998"
 echo "📁 Location: $TARGET_DIR"
-echo "💡 Double-click start.command anytime to relaunch!"
+echo "🖥️  Desktop app: $INSTALL_APP"
+echo "💡 Double-click “MLX Controller” on the Desktop anytime."
 echo "--------------------------------------------------------"

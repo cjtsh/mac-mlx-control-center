@@ -1,5 +1,5 @@
 
-# ⚡ macOS MLX Control Center `v0.8.9` (Vision Sync Edition)
+# ⚡ macOS MLX Control Center `v0.9.0` (MLX Controller Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -24,13 +24,30 @@ Open Terminal and paste this single command:
 ```bash
 curl -sSL https://raw.githubusercontent.com/cjtsh/mac-mlx-control-center/main/install.sh | bash
 ```
+This installs the **MLX Controller** desktop app, starts the dashboard, and puts a controller alias on your Desktop.
 
 ---
 
-### Option B: Double-Click Launcher
+### Option B: Clone + Double-Click Installer
 1. Download or clone this repository to your Mac.
-2. Double-click **`start.command`** in Finder.
-3. The server launches and automatically opens the dashboard in your default browser (`http://127.0.0.1:9998`)!
+2. Double-click **`install.command`** (or run `./install.sh` in Terminal).
+3. Open **MLX Controller** from Applications or the Desktop alias. It starts the server and opens the dashboard at `http://127.0.0.1:9998`.
+
+---
+
+## 🖥️ MLX Controller Desktop App (New in v0.9.0)
+
+A small native macOS window that owns the server lifecycle, so the dashboard is always one click away:
+
+* **Start / Stop / Restart** the control-center server, with live status (`Stopped`, `Starting`, `Running`, `Couldn’t start`).
+* **Open Dashboard** opens `http://127.0.0.1:9998` in your browser.
+* **No menu-bar icon.** It lives in the Dock only while open.
+* **Safe by design:** it never kills whatever happens to own port 9998. If the port belongs to another app it shows `Port 9998 is in use by Python (PID 9003)` and leaves that process alone. If it finds a control center it did not start, it adopts it and labels it “started outside this app”.
+* **Graceful shutdown:** `SIGTERM`, then `SIGKILL` only if the server ignores it. Quitting the app stops a server it owns; an externally started server is left running.
+* **Logs** at `~/Library/Logs/MLX Controller/server.log`; the last lines appear in the window when startup fails.
+* **Config** at `~/Library/Application Support/MLX Controller/config.json` (repo path, Python path, port, auto-start, stop-on-quit).
+
+Build it yourself with `./desktop/build_app.sh`; `./desktop/build_app.sh --install` installs to `/Applications` and refreshes the Desktop alias. The installer builds from source when Xcode Command Line Tools are present, otherwise it downloads the prebuilt release asset.
 
 ---
 
@@ -38,6 +55,7 @@ curl -sSL https://raw.githubusercontent.com/cjtsh/mac-mlx-control-center/main/in
 
 Most local LLM runners are either overly complex, hog system menubars, or require manual hand-editing of configuration JSON files for coding tools. **macOS MLX Control Center** solves this with:
 
+* 🖥️ **MLX Controller desktop app (v0.9.0)**: a native window with Start / Stop / Restart / Open Dashboard, live health status, graceful shutdown, port-conflict safety, and no menu-bar icon. Installed to `/Applications` with a Desktop alias; the installer leaves models and the model server on 9999 untouched.
 * 📦 **Serves from your drive (v0.8.5)**: repo-id requests reuse the weights already on the external drive (`HF_HUB_CACHE` is pointed at the library) instead of silently re-downloading into `~/.cache`.
 * 👁️ **Harness Vision Sync (v0.8.9)**: the one-click Harness sync now declares `input: [text, image]` for vision models, so DeepSeek Harness forwards image attachments to `mlx-vlm` instead of rejecting them with *"The current model does not support images"* — DSH treats custom OpenAI-compatible providers as text-only until a model says otherwise.
 * 🔄 **One-Click Harness Sync (v0.8.4)**: every installed model is written into your DeepSeek Harness `mlx-local` provider by a single button (or `./mlx.sh sync-harness`) — no hand-editing YAML, no retyping repo ids.
