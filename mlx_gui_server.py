@@ -958,7 +958,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
 
 # One source of truth for the release: the title, the badge and the banner all
 # read this, so they can no longer drift apart (v0.11.6 shipped a stale badge).
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 
 INDEX_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -1627,7 +1627,7 @@ INDEX_HTML = """<!DOCTYPE html>
   <div id="tab-test" class="tab-content">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
       <h2 style="font-size: 18px; font-weight: 600;">Test Any Model Engine (Text &amp; Vision)</h2>
-      <button class="btn btn-secondary" onclick="loadTestServers()">🔄 Refresh Server List</button>
+      <button class="btn btn-secondary" onclick="loadTestServers(true)">🔄 Refresh Server List</button>
     </div>
     <div class="chat-box">
       <div style="margin-bottom: 16px;">
@@ -1638,7 +1638,7 @@ INDEX_HTML = """<!DOCTYPE html>
         <div style="display: flex; gap: 8px; margin-top: 8px; align-items: center;">
           <input id="testBaseUrl" type="text" placeholder="Custom base URL (optional) — e.g. http://127.0.0.1:8000/v1"
                  style="flex: 1; font-size: 12px; padding: 8px 10px;">
-          <button class="btn btn-secondary" style="padding: 8px 12px; font-size: 12px;" onclick="loadTestServers()" title="Re-scan engines and models">⟳</button>
+          <button class="btn btn-secondary" style="padding: 8px 12px; font-size: 12px;" onclick="loadTestServers(true)" title="Re-scan engines and models">⟳</button>
         </div>
         <div id="testTargetHint" style="font-size: 11px; color: var(--text-muted); margin-top: 6px;"></div>
       </div>
@@ -3180,7 +3180,7 @@ INDEX_HTML = """<!DOCTYPE html>
                 </div>
                 <div class="card-actions">
                   <button class="btn btn-danger" onclick="stopServer('${s.pid}')">🛑 Stop Server</button>
-                  <button class="btn btn-secondary" onclick="switchTab('test'); loadTestServers();">🧪 Test API</button>
+                  <button class="btn btn-secondary" onclick="switchTab('test'); loadTestServers(true);">🧪 Test API</button>
                 </div>
               </div>`;
           });
@@ -3220,7 +3220,7 @@ INDEX_HTML = """<!DOCTYPE html>
                 </div>
                 <div class="card-actions">
                   <button class="btn btn-danger" onclick='stopOllamaModel(${JSON.stringify(l.id)})'>🛑 Stop Model</button>
-                  <button class="btn btn-secondary" onclick="switchTab('test'); loadTestServers();">🧪 Test API</button>
+                  <button class="btn btn-secondary" onclick="switchTab('test'); loadTestServers(true);">🧪 Test API</button>
                   <button class="btn btn-secondary" onclick="openOllamaModal()">🦙 Manage</button>
                 </div>
               </div>`;
@@ -3228,18 +3228,22 @@ INDEX_HTML = """<!DOCTYPE html>
         }
 
         applyViewMode();
-        loadTestServers();
+        loadTestServers();   // no-op unless the engine list actually changed
       } catch (e) {
         console.error(e);
       }
     }
 
-    async function loadTestServers() {
+    let _testServersSig = '';
+
+    async function loadTestServers(force) {
       const select = document.getElementById('testServerSelect');
       if (!select) return;
+      // Rebuilding this <select> closes an open menu and drops the highlight, so
+      // never touch it while the user is pointing at it.
+      if (document.activeElement === select && !force) return;
       const hint = document.getElementById('testTargetHint');
       const currentVal = select.value;
-      select.innerHTML = '';
       let mlxCount = 0;
       let ollamaCount = 0;
       try {
@@ -3249,6 +3253,16 @@ INDEX_HTML = """<!DOCTYPE html>
         ]);
         const servers = results[0].servers || [];
         const ollama = results[1].ollama || {};
+        const oms = ollama.models || [];
+        const sig = JSON.stringify([
+          servers.map(x => [x.model, x.port, x.status]),
+          ollama.running ? oms.map(m => [m.id, m.size_gb]) : []
+        ]);
+        if (!force && sig === _testServersSig && select.options.length) {
+          return;   // same engines, same models: leave the menu alone
+        }
+        _testServersSig = sig;
+        select.innerHTML = '';
 
         if (servers.length) {
           const group = document.createElement('optgroup');
@@ -3263,7 +3277,8 @@ INDEX_HTML = """<!DOCTYPE html>
             opt.setAttribute('data-port', srv.port);
             opt.setAttribute('data-kind', 'mlx');
             const engTag = (srv.engine === 'mlx-vlm' || srv.is_vision) ? '👁️ Vision' : '⚡ Text';
-            opt.innerText = `[Port ${srv.port} - ${engTag}] ${srv.model} (${srv.status})`;
+            opt.innerText = `[Port ${srv.port} - ${engTag}] ${srv.model}`;
+            opt.setAttribute('data-status', srv.status || '');
             group.appendChild(opt);
           });
           select.appendChild(group);
@@ -3301,7 +3316,9 @@ INDEX_HTML = """<!DOCTYPE html>
           Array.from(select.options).forEach(opt => { if (opt.value === currentVal) opt.selected = true; });
         }
         if (hint) {
-          hint.innerText = `${mlxCount} MLX server(s) · ${ollamaCount} Ollama model(s) · or paste any OpenAI-compatible base URL above`;
+          const st = servers.map(x => `${x.model.split('/').pop()} ${x.status || ''}`.trim()).join(', ');
+          hint.innerText = `${mlxCount} MLX server(s) · ${ollamaCount} Ollama model(s)` +
+            (st ? ` · ${st}` : '') + ' · or paste any OpenAI-compatible base URL above';
         }
       } catch (e) {
         console.error(e);

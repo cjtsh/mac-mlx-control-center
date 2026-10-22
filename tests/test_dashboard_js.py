@@ -59,6 +59,18 @@ def main():
     for fn in ("loadModels", "openOllamaModal", "importGguf", "refreshOllamaModal"):
         check(f"script defines {fn}", f"function {fn}" in script or f"{fn} =" in script)
 
+    # The test-panel dropdown must survive the 3-second status poll: rebuilding
+    # it closed an open menu and made the model look like it vanished.
+    js = open(os.path.join(REPO, "mlx_gui_server.py")).read()
+    check("the dropdown is not rebuilt while the menu is open",
+          "document.activeElement === select" in js, "activeElement guard")
+    check("the dropdown is skipped when nothing changed",
+          "_testServersSig" in js, "signature skip")
+    check("refresh buttons still force a rebuild",
+          js.count("loadTestServers(true)") >= 3, js.count("loadTestServers(true)"))
+    check("the option label no longer carries the flapping status word",
+          "(srv.status)</arg>" if False else "opt.innerText = `[Port ${srv.port} - ${engTag}] ${srv.model}`" in js, "label")
+
     print(f"\n{'All dashboard checks passed.' if not failures else f'{failures} failure(s)'}")
     return 1 if failures else 0
 
