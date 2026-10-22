@@ -1,5 +1,5 @@
 
-# ⚡ macOS MLX Control Center `v0.10.2` (MLX Controller Edition)
+# ⚡ macOS MLX Control Center `v0.10.3` (MLX Controller Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -245,7 +245,7 @@ python3 tests/test_token_budget.py
 
 Tests: `python3 tests/test_stream_guard.py` (no model download, no network).
 
-## ⚡ Prefix Cache: Why “hello” Took 90 Seconds (v0.10.2)
+## ⚡ Prefix Cache: Why “hello” Took 90 Seconds (v0.10.2, RAM budget in v0.10.3)
 
 **Symptom:** a harness that carries a big context answers a two-word question after a minute of
 silence. The model is fine, the tokens are fine, the engine was just re-reading the entire
@@ -275,6 +275,11 @@ Measured on the 288-billion-parameter MoE model, three turns of one growing conv
 | 2 | 7,579 | 7,555 | **0.442 s** |
 | 3 | 7,602 | 7,578 | **0.261 s** |
 
+* **Two shapes of cache, both budgeted.** Dense models reuse 16-token *pages* (`APC_NUM_BLOCKS`);
+  hybrid/rotating-attention models — most VLMs, including the 288B — keep whole-prefix *snapshots*
+  instead (`APC_EXACT_CACHE_ENTRIES`, `APC_MEMORY_MAX_GB`), which `mlx-vlm` otherwise caps at
+  2 snapshots and 8 GB. Measured on the 288B: **~2 GB per 63k-token conversation**, so four
+  snapshots and a 16 GB ceiling still leave the machine plenty of headroom.
 * **Only turns that share a prefix get faster.** The first turn of a session still prefills
   everything — that part is the model reading the context, not an overhead.
 * **`mlx-lm` is untouched:** it has its own prompt cache and ignores these variables. (Upstream,
@@ -286,7 +291,8 @@ Measured on the 288-billion-parameter MoE model, three turns of one growing conv
 
 ```bash
 # settings.json
-{"prefix_cache": true, "prefix_cache_blocks": 4096, "prefix_cache_disk_gb": 20}
+{"prefix_cache": true, "prefix_cache_blocks": 4096, "prefix_cache_disk_gb": 20,
+ "prefix_cache_entries": 4, "prefix_cache_memory_gb": 16}
 
 MLX_VLM_APC=0 ./mlx.sh start <model>   # launch without the cache
 python3 tests/test_prefix_cache.py     # 22 checks, no model download

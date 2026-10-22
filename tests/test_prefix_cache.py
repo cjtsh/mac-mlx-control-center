@@ -32,9 +32,11 @@ def run():
         h.SETTINGS_FILE = settings
 
         # ---- defaults -----------------------------------------------------
-        on, blocks, gb = h.prefix_cache_settings()
-        check("defaults: on, 4096 blocks, 20 GB disk", on and blocks == 4096 and gb == 20.0,
-              (on, blocks, gb))
+        cfg = h.prefix_cache_settings()
+        check("defaults: on, 4096 blocks, 20 GB disk", cfg["enabled"] and cfg["blocks"] == 4096
+              and cfg["disk_gb"] == 20.0, cfg)
+        check("defaults: 4 snapshots in RAM", cfg["entries"] == 4, cfg)
+        check("defaults: 16 GB cache ceiling", cfg["memory_gb"] == 16.0, cfg)
 
         env = h.apc_env({}, engine="mlx-vlm")
         check("vlm launch: APC_ENABLED=1", env.get("APC_ENABLED") == "1", env)
@@ -44,6 +46,10 @@ def run():
               env.get("MLX_VLM_CACHE_HOME", "").endswith(".cache/mlx-vlm"), env)
         check("vlm launch: disk tier capped", env.get("APC_DISK_MAX_GB") == "20.0", env)
         check("vlm launch: does not disable disk tier", "APC_DISK_ENABLED" not in env, env)
+        check("vlm launch: snapshot count raised above mlx-vlm's 2",
+              env.get("APC_EXACT_CACHE_ENTRIES") == "4", env)
+        check("vlm launch: memory ceiling raised above mlx-vlm's 8 GB",
+              env.get("APC_MEMORY_MAX_GB") == "16.0", env)
 
         # ---- mlx-lm is left alone (it has its own prompt cache) -----------
         lm = h.apc_env({"HF_HUB_CACHE": "/x"}, engine="mlx-lm")
@@ -78,8 +84,19 @@ def run():
 
         with open(settings, "w") as fh:
             json.dump({"prefix_cache_blocks": 0}, fh)
-        on, blocks, gb = h.prefix_cache_settings()
-        check("bogus block count falls back", blocks == h.APC_DEFAULT_BLOCKS, blocks)
+        check("bogus block count falls back",
+              h.prefix_cache_settings()["blocks"] == h.APC_DEFAULT_BLOCKS)
+
+        with open(settings, "w") as fh:
+            json.dump({"prefix_cache_entries": 8, "prefix_cache_memory_gb": 32}, fh)
+        env = h.apc_env({}, engine="mlx-vlm")
+        check("custom snapshot count used", env.get("APC_EXACT_CACHE_ENTRIES") == "8", env)
+        check("custom memory ceiling used", env.get("APC_MEMORY_MAX_GB") == "32.0", env)
+
+        with open(settings, "w") as fh:
+            json.dump({"prefix_cache_memory_gb": 0}, fh)
+        env = h.apc_env({}, engine="mlx-vlm")
+        check("memory_gb 0 leaves mlx-vlm's own ceiling", "APC_MEMORY_MAX_GB" not in env, env)
 
         # ---- status -------------------------------------------------------
         info = h.apc_status(None)

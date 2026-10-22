@@ -32,6 +32,8 @@ def load_global_settings():
         "prefix_cache": True,          # reuse the KV of a prompt prefix shared by two turns
         "prefix_cache_blocks": 4096,   # 16 tokens per block -> 65,536 reusable tokens
         "prefix_cache_disk_gb": 20,    # warm-disk tier that survives a restart
+        "prefix_cache_entries": 4,     # whole-prefix snapshots in RAM (hybrid/VLM models)
+        "prefix_cache_memory_gb": 16,  # ceiling for the in-RAM cache (mlx-vlm defaults to 8)
     }
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -405,25 +407,42 @@ APC_CACHE_HOME = os.path.expanduser("~/.cache/mlx-vlm")
 APC_DEFAULT_BLOCKS = 4096      # 16 tokens/block -> 65,536 reusable tokens in RAM
 APC_BLOCK_SIZE = 16
 APC_DEFAULT_DISK_GB = 20
+APC_DEFAULT_ENTRIES = 4        # whole-prefix snapshots kept in RAM (VLM layouts)
+APC_DEFAULT_MEMORY_GB = 16     # ceiling for the in-RAM cache; mlx-vlm auto-caps at 8
 
 def prefix_cache_settings():
-    """(enabled, blocks, disk_gb) from settings.json, with safe fallbacks."""
+    """Prefix-cache knobs from settings.json, with safe fallbacks."""
     st = load_global_settings()
     enabled = st.get("prefix_cache", True)
     if isinstance(enabled, str):
         enabled = enabled.strip().lower() not in ("0", "false", "no", "off", "")
-    try:
-        blocks = int(st.get("prefix_cache_blocks") or APC_DEFAULT_BLOCKS)
-    except Exception:
-        blocks = APC_DEFAULT_BLOCKS
-    try:
-        disk_gb = float(st.get("prefix_cache_disk_gb", APC_DEFAULT_DISK_GB))
-    except Exception:
-        disk_gb = float(APC_DEFAULT_DISK_GB)
-    return bool(enabled), max(1, blocks), max(0.0, disk_gb)
+    def _num(key, default, cast):
+        try:
+            return cast(st.get(key, default))
+        except Exception:
+            return cast(default)
+    blocks = _num("prefix_cache_blocks", APC_DEFAULT_BLOCKS, int)
+    blocks = blocks if blocks > 0 else APC_DEFAULT_BLOCKS
+    disk_gb = max(0.0, _num("prefix_cache_disk_gb", APC_DEFAULT_DISK_GB, float))
+    entries = _num("prefix_cache_entries", APC_DEFAULT_ENTRIES, int)
+    entries = entries if entries > 0 else APC_DEFAULT_ENTRIES
+    memory_gb = max(0.0, _num("prefix_cache_memory_gb", APC_DEFAULT_MEMORY_GB, float))
+    return {
+        "enabled": bool(enabled),
+        "blocks": blocks,
+        "disk_gb": disk_gb,
+        "entries": entries,
+        "memory_gb": memory_gb,
+    }
 
 def apc_env(env=None, engine="mlx-vlm"):
     """Environment that switches on mlx-vlm's prefix cache.
+
+    Two shapes of cache exist. Dense models reuse 16-token "pages" sized by
+    APC_NUM_BLOCKS; hybrid/rotating-attention models (most VLMs) cannot stitch pages
+    back together and keep whole-prefix snapshots instead — for those the dials are
+    APC_EXACT_CACHE_ENTRIES and APC_MEMORY_MAX_GB, which mlx-vlm otherwise caps at
+    2 snapshots and 8 GB. Both are set here, so either layout gets a sane budget.
 
     Set MLX_VLM_APC=0 to launch without it. Non-VLM engines already have a prompt
     cache of their own, so they are left untouched.
@@ -433,26 +452,31 @@ def apc_env(env=None, engine="mlx-vlm"):
         return env
     if (env.get("MLX_VLM_APC") or os.environ.get("MLX_VLM_APC") or "").strip() == "0":
         return env
-    enabled, blocks, disk_gb = prefix_cache_settings()
-    if not enabled:
+    cfg = prefix_cache_settings()
+    if not cfg["enabled"]:
         return env
     env.setdefault("APC_ENABLED", "1")
     env.setdefault("APC_BLOCK_SIZE", str(APC_BLOCK_SIZE))
-    env.setdefault("APC_NUM_BLOCKS", str(blocks))
+    env.setdefault("APC_NUM_BLOCKS", str(cfg["blocks"]))
+    env.setdefault("APC_EXACT_CACHE_ENTRIES", str(cfg["entries"]))
+    if cfg["memory_gb"] > 0:
+        env.setdefault("APC_MEMORY_MAX_GB", str(cfg["memory_gb"]))
     env.setdefault("MLX_VLM_CACHE_HOME", APC_CACHE_HOME)
-    if disk_gb > 0:
-        env.setdefault("APC_DISK_MAX_GB", str(disk_gb))
+    if cfg["disk_gb"] > 0:
+        env.setdefault("APC_DISK_MAX_GB", str(cfg["disk_gb"]))
     else:
         env.setdefault("APC_DISK_ENABLED", "0")
     return env
 
 def apc_status(port=None, timeout=1.5):
     """Prefix-cache state for the dashboard: configured, and what the server reports."""
-    enabled, blocks, disk_gb = prefix_cache_settings()
+    cfg = prefix_cache_settings()
     info = {
-        "enabled": enabled,
-        "blocks": blocks,
-        "disk_gb": disk_gb,
+        "enabled": cfg["enabled"],
+        "blocks": cfg["blocks"],
+        "disk_gb": cfg["disk_gb"],
+        "entries": cfg["entries"],
+        "memory_gb": cfg["memory_gb"],
         "cache_home": APC_CACHE_HOME,
         "server_running": False,
         "server_enabled": False,
@@ -474,6 +498,8 @@ def apc_status(port=None, timeout=1.5):
             info["lookups_miss"] = data.get("lookups_miss") or 0
             info["resident_bytes"] = data.get("resident_bytes")
             info["disk_bytes"] = data.get("disk_bytes")
+            info["memory_max_bytes"] = data.get("memory_max_bytes")
+            info["exact_hits"] = data.get("exact_hits")
     except Exception as exc:
         info["error"] = str(exc)
     return info
