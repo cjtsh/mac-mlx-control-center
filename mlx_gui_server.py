@@ -925,7 +925,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
 
 # One source of truth for the release: the title, the badge and the banner all
 # read this, so they can no longer drift apart (v0.11.6 shipped a stale badge).
-APP_VERSION = "0.11.12"
+APP_VERSION = "0.11.13"
 
 INDEX_HTML = """<!DOCTYPE html>
 <html lang="en">

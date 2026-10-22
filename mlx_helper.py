@@ -700,7 +700,13 @@ def ollama_unload(tag=None, port=None, timeout=60):
             done.append(t)
         except Exception:
             pass
+    # The engine drops the model asynchronously: give it a moment before
+    # reporting, or every Stop looks like it failed.
     remaining = [m["id"] for m in ollama_ps(port=port)]
+    deadline = time.time() + 6
+    while remaining and time.time() < deadline:
+        time.sleep(0.4)
+        remaining = [m["id"] for m in ollama_ps(port=port)]
     return {"ok": True, "unloaded": done, "still_loaded": remaining}
 
 def ollama_run(tag, port=None, keep_alive="30m", timeout=900):
