@@ -908,12 +908,16 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
         else:
             self.send_json({"error": "Not Found"}, 404)
 
+# One source of truth for the release: the title, the badge and the banner all
+# read this, so they can no longer drift apart (v0.11.6 shipped a stale badge).
+APP_VERSION = "0.11.10"
+
 INDEX_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.11.9 (MLX + Ollama)</title>
+  <title>macOS MLX Control Center v""" + APP_VERSION + """ (MLX + Ollama)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1354,7 +1358,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.11.6 (MLX + Ollama)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v""" + APP_VERSION + """ (MLX + Ollama)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
@@ -3136,7 +3140,7 @@ INDEX_HTML = """<!DOCTYPE html>
                     <span>Memory: <strong style="color: #f3f4f6;">${(olLoaded.length === 1 && stats.model_ram_gb) ? stats.model_ram_gb : (l.vram_gb || l.size_gb)} GB</strong>${(olLoaded.length === 1 && stats.model_ram_gb && Math.abs(stats.model_ram_gb - (l.vram_gb || l.size_gb)) > 0.5) ? ` <span style="color: var(--text-muted);">(reserves ${l.vram_gb || l.size_gb} GB)</span>` : ''}</span>
                     ${l.context ? `<span>Context: <strong style="color: #f3f4f6;">${Math.round(l.context / 1024)}K</strong></span>` : ''}
                     <span>Port: <strong style="color: #f3f4f6;">${ol.port || 11434}</strong></span>
-                    <span>Endpoint: <code style="color: #60a5fa;">${(() => { const b = ol.base_url || 'http://127.0.0.1:11434'; return b.replace(/\/+$/, '').endsWith('/v1') ? b.replace(/\/+$/, '') : b.replace(/\/+$/, '') + '/v1'; })()}</code></span>
+                    <span>Endpoint: <code style="color: #60a5fa;">${(() => { let b = (ol.base_url || 'http://127.0.0.1:11434').trim(); if (b.endsWith('/')) b = b.slice(0, -1); return b.endsWith('/v1') ? b : b + '/v1'; })()}</code></span>
                   </div>
                 </div>
                 <div class="card-actions">

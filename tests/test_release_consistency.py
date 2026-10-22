@@ -17,6 +17,10 @@ import mlx_gui_server as g  # noqa: E402
 failures = []
 
 
+def html_count(text, needle):
+    return text.count(needle)
+
+
 def check(name, ok, detail=None):
     print(("PASS  " if ok else "FAIL  ") + name + ("" if ok else f"  <- {detail}"))
     if not ok:
@@ -36,11 +40,17 @@ def version_of(path):
 versions = {
     "README.md": version_of("README.md")[0],
     "mlx.sh": version_of("mlx.sh")[0],
-    "mlx_gui_server.py": version_of("mlx_gui_server.py")[0],
+    "mlx_gui_server.py": g.APP_VERSION,
     "desktop/Info.plist": version_of("desktop/Info.plist")[0],
 }
 # the banner, the title and the bundle must carry the same release
 check("version agrees everywhere", len(set(versions.values())) == 1, versions)
+# The badge and the title once drifted: v0.11.6 in the header, v0.11.9 served.
+indexed = sorted(set(re.findall(r"v(\d+\.\d+\.\d+)", g.INDEX_HTML)))
+check("the dashboard shows only the current version", indexed == [g.APP_VERSION], indexed)
+stamp = "v" + g.APP_VERSION
+check("title and badge both carry that version", g.INDEX_HTML.count(stamp) >= 2,
+      g.INDEX_HTML.count(stamp))
 
 html = g.INDEX_HTML
 import inspect
