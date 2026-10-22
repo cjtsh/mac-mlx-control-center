@@ -654,6 +654,31 @@ def ollama_pid(port=None):
     except Exception:
         return None
 
+def ollama_ps(port=None, timeout=2.0):
+    """Models the Ollama engine currently holds in memory (`/api/ps`).
+
+    This is the only way to tell the engine is serving something: the daemon
+    runs whether or not a model is loaded.
+    """
+    try:
+        data = _ollama_http("/api/ps", port=port, timeout=timeout) or {}
+    except Exception:
+        return []
+    out = []
+    for m in (data.get("models") or []):
+        if not isinstance(m, dict):
+            continue
+        size = m.get("size") or 0
+        vram = m.get("size_vram") or 0
+        out.append({
+            "id": m.get("name") or m.get("model") or "",
+            "size_gb": round(size / (1024**3), 2) if size else 0,
+            "vram_gb": round(vram / (1024**3), 2) if vram else 0,
+            "expires_at": m.get("expires_at") or "",
+            "context": m.get("context_length") or 0,
+        })
+    return out
+
 def ollama_models(port=None, timeout=3.0):
     """Models the running daemon can serve: id, size, family, params, context."""
     try:
@@ -749,6 +774,10 @@ def ollama_status(port=None, with_models=True):
     if info["running"] and with_models:
         info["models"] = ollama_models(port)
         info["model_count"] = len(info["models"])
+        # A running daemon says nothing about whether a model is in memory.
+        info["loaded"] = ollama_ps(port)
+        info["loaded_count"] = len(info["loaded"])
+        info["loaded_gb"] = round(sum(m["vram_gb"] or m["size_gb"] for m in info["loaded"]), 2)
     return info
 
 def ollama_start(port=None, store=None, context=None, wait_seconds=25):
@@ -3471,6 +3500,14 @@ def get_system_stats():
     # RAM a model can realistically use: macOS keeps a wired/GPU reserve and compresses memory
     usable_ram = max(total_ram - max(4 * 1024**3, total_ram * 0.12), total_ram * 0.55)
 
+    # Models held in memory by the Ollama engine count as model memory too; the
+    # dashboard is engine-agnostic, so "0 GB" while a 72B is loaded would lie.
+    try:
+        ollama_loaded = ollama_ps()
+    except Exception:
+        ollama_loaded = []
+    ollama_model_ram = sum(m["vram_gb"] or m["size_gb"] for m in ollama_loaded)
+
     return {
         "total_ram_gb": round(total_ram / (1024**3), 1),
         "used_ram_gb": round(used_ram / (1024**3), 1),
@@ -3482,8 +3519,12 @@ def get_system_stats():
         "compressed_ram_gb": round(compressor / (1024**3), 1),
         "ram_percent": round((used_ram / total_ram) * 100, 1) if total_ram else 0,
         "mlx_ram_gb": round(mlx_ram / (1024**3), 2),
+        "ollama_ram_gb": round(ollama_model_ram, 2),
+        "model_ram_gb": round(mlx_ram / (1024**3) + ollama_model_ram, 2),
         "cpu_percent": cpu_percent,
-        "active_models": len(servers)
+        "active_models": len(servers) + len(ollama_loaded),
+        "mlx_active_models": len(servers),
+        "ollama_loaded": ollama_loaded
     }
 
 def classify_process(pid, user, args, active_server_pids=None):

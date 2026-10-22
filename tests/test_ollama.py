@@ -255,6 +255,20 @@ def run():
         finally:
             h._ollama_http, h.ollama_pid = real_req, real_pid
         check("status reports not running", st.get("running") is False, st)
+        # ---- "is it actually running?" comes from /api/ps, not from the daemon ----
+        real_http = h._ollama_http
+        try:
+            h._ollama_http = lambda *a, **k: {"models": [
+                {"name": "qwen2.5:72b-instruct-q4_K_M", "size": 61800000000,
+                 "size_vram": 61800000000, "context_length": 32768}]}
+            ps = h.ollama_ps()
+            check("ps lists the loaded model", [m["id"] for m in ps] == ["qwen2.5:72b-instruct-q4_K_M"], ps)
+            check("ps reports memory in GB", ps[0]["vram_gb"] > 50, ps[0])
+            h._ollama_http = lambda *a, **k: None
+            check("ps is empty when the daemon is down", h.ollama_ps() == [])
+        finally:
+            h._ollama_http = real_http
+
         check("status still names the store", bool(st.get("store")), st)
     finally:
         h.ollama_harness_models = real_models

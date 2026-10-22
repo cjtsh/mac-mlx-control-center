@@ -904,7 +904,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.11.5 (MLX + Ollama)</title>
+  <title>macOS MLX Control Center v0.11.6 (MLX + Ollama)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1345,7 +1345,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.11.5 (MLX + Ollama)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.11.6 (MLX + Ollama)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
@@ -1370,10 +1370,10 @@ INDEX_HTML = """<!DOCTYPE html>
       <div class="htop-progress"><div class="htop-fill" id="htopRamFill" style="width: 0%;"></div></div>
       <div style="font-size: 12px; color: var(--text-muted);" id="htopRamMeta">-- GB Available</div>
     </div>
-    <div class="htop-item">
-      <div class="htop-label">MLX Models Memory</div>
+    <div class="htop-item" id="htopModelMem" title="Models held in memory, whichever engine runs them (MLX servers or the Ollama engine)">
+      <div class="htop-label">Model Memory</div>
       <div class="htop-val" id="htopMlxVal">-- GB</div>
-      <div style="font-size: 12px; color: var(--text-muted);" id="htopMlxMeta">0 Active Models</div>
+      <div style="font-size: 12px; color: var(--text-muted);" id="htopMlxMeta">No model loaded</div>
     </div>
     <div class="htop-item">
       <div class="htop-label">CPU Utilization</div>
@@ -2970,8 +2970,21 @@ INDEX_HTML = """<!DOCTYPE html>
           if (document.getElementById('htopRamMeta')) {
             document.getElementById('htopRamMeta').innerText = stats.free_ram_gb + ' GB Available (' + (stats.cached_ram_gb || 0) + ' GB Cache)';
           }
-          document.getElementById('htopMlxVal').innerText = stats.mlx_ram_gb + ' GB';
-          document.getElementById('htopMlxMeta').innerText = stats.active_models + ' Active Model(s)';
+          const loadedOllama = stats.ollama_loaded || [];
+          const modelGb = (stats.model_ram_gb !== undefined) ? stats.model_ram_gb : stats.mlx_ram_gb;
+          const memParts = [];
+          if (stats.mlx_active_models) memParts.push('MLX ' + stats.mlx_ram_gb + ' GB');
+          if (loadedOllama.length) memParts.push('Ollama ' + stats.ollama_ram_gb + ' GB');
+          document.getElementById('htopMlxVal').innerText = modelGb + ' GB';
+          const memEl = document.getElementById('htopMlxMeta');
+          if (stats.active_models) {
+            const names = loadedOllama.map(m => m.id).filter(Boolean);
+            memEl.innerText = stats.active_models + ' model(s) loaded · ' + memParts.join(' · ');
+            memEl.title = names.length ? ('Loaded: ' + names.join(', ')) : '';
+          } else {
+            memEl.innerText = 'No model loaded';
+            memEl.title = 'Start an MLX model, or send a prompt to an Ollama tag';
+          }
           document.getElementById('htopCpuVal').innerText = stats.cpu_percent + '%';
           document.getElementById('htopCpuFill').style.width = Math.min(stats.cpu_percent, 100) + '%';
         }
@@ -3019,6 +3032,7 @@ INDEX_HTML = """<!DOCTYPE html>
         // Ollama is a daemon on its own port, so it is reported next to — not inside —
         // the MLX server list.
         const ol = data.ollama || {};
+        const olLoaded = ol.loaded || [];
         let ollamaPill = '';
         if (ol.installed) {
           const olOn = !!ol.running;
@@ -3034,9 +3048,10 @@ INDEX_HTML = """<!DOCTYPE html>
 
         if (activeServers.length > 0) {
           const readyCount = activeServers.filter(s => s.status === 'READY').length;
+          const olSuffix = olLoaded.length ? ` · ${olLoaded.length} Ollama model(s) loaded` : '';
           statusHeader.innerHTML = `
-            <div class="status-pill ${readyCount > 0 ? 'ready' : 'none'}">
-              <span class="status-dot"></span> ${activeServers.length} Active MLX Server(s) (${readyCount} Ready)
+            <div class="status-pill ${(readyCount > 0 || olLoaded.length) ? 'ready' : 'none'}">
+              <span class="status-dot"></span> ${activeServers.length} Active MLX Server(s) (${readyCount} Ready)${olSuffix}
             </div>`;
           statusHeader.innerHTML += guardPill;
           statusHeader.innerHTML += pcPill;
@@ -3077,13 +3092,42 @@ INDEX_HTML = """<!DOCTYPE html>
           });
         } else {
           statusHeader.innerHTML = `
-            <div class="status-pill none">
-              <span class="status-dot"></span> 0 Active MLX Servers
+            <div class="status-pill ${olLoaded.length ? 'ready' : 'none'}">
+              <span class="status-dot"></span> 0 Active MLX Servers${olLoaded.length ? ` · ${olLoaded.length} Ollama model(s) loaded` : ''}
             </div>`;
           statusHeader.innerHTML += guardPill;
           statusHeader.innerHTML += pcPill;
           statusHeader.innerHTML += ollamaPill;
           serverContainer.innerHTML = `<div class="card" style="grid-column: 1 / -1; width: 100%; text-align: center; color: var(--text-muted); padding: 18px;">No model currently running. Click "Start Model" on any downloaded model below!</div>`;
+        }
+
+        // A loaded Ollama model is just as "running" as an MLX server: show it.
+        if (olLoaded.length) {
+          if (/No model currently running/.test(serverContainer.innerHTML)) serverContainer.innerHTML = '';
+          olLoaded.forEach(l => {
+            serverContainer.innerHTML += `
+              <div class="card">
+                <div class="card-main">
+                  <div class="card-header-row">
+                    <div class="card-title">${l.id}</div>
+                    <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+                      <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(52, 211, 153, 0.18); color: #6ee7b7; border: 1px solid rgba(52, 211, 153, 0.35); font-weight: 600;">🦙 Ollama engine</span>
+                      <span class="status-pill ready"><span class="status-dot"></span> LOADED</span>
+                    </div>
+                  </div>
+                  <div class="card-meta">
+                    <span>Memory: <strong style="color: #f3f4f6;">${l.vram_gb || l.size_gb} GB</strong></span>
+                    ${l.context ? `<span>Context: <strong style="color: #f3f4f6;">${Math.round(l.context / 1024)}K</strong></span>` : ''}
+                    <span>Port: <strong style="color: #f3f4f6;">${ol.port || 11434}</strong></span>
+                    <span>Endpoint: <code style="color: #60a5fa;">${(ol.base_url || 'http://127.0.0.1:11434') + '/v1'}</code></span>
+                  </div>
+                </div>
+                <div class="card-actions">
+                  <button class="btn btn-secondary" onclick="switchTab('test'); loadTestServers();">🧪 Test API</button>
+                  <button class="btn btn-secondary" onclick="openOllamaModal()">🦙 Manage</button>
+                </div>
+              </div>`;
+          });
         }
 
         applyViewMode();
@@ -3298,9 +3342,14 @@ INDEX_HTML = """<!DOCTYPE html>
           return;
         }
         const running = !!o.running;
+        const loaded = o.loaded || [];
+        const loadedIds = loaded.map(l => l.id);
+        const loadedLine = loaded.length
+          ? `<div style="font-size:12px; margin-bottom:6px; color:#34d399;">🟢 In memory now: ${loaded.map(l => `${l.id} (${(l.vram_gb || l.size_gb)} GB${l.context ? ', ' + Math.round(l.context / 1024) + 'K ctx' : ''})`).join(' · ')}</div>`
+          : `<div style="font-size:12px; margin-bottom:6px; color:${running ? '#9ca3af' : '#6b7280'};">${running ? '⚪ Nothing loaded in memory — the first prompt loads the model (from the store path above).' : '⚪ Engine not running — no model can be loaded.'}</div>`;
         const rows = (o.models || []).map(m => `
           <tr>
-            <td style="padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.06); color:#f3f4f6;">${m.id}</td>
+            <td style="padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.06); color:#f3f4f6;">${loadedIds.includes(m.id) ? '🟢 ' : ''}${m.id}</td>
             <td style="padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.06);">${m.size_gb ? m.size_gb + ' GB' : '-'}</td>
             <td style="padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.06);">${m.family || '-'}</td>
             <td style="padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.06);">${m.parameter_size || '-'} ${m.quantization || ''}</td>
@@ -3313,6 +3362,7 @@ INDEX_HTML = """<!DOCTYPE html>
             ${o.launch_agent ? '<div class="status-pill none">launchd-managed</div>' : ''}
           </div>
           <div style="font-size:12px; margin-bottom:6px;">Store: <code style="color:#f3f4f6;">${o.store}</code></div>
+          ${loadedLine}
           ${o.launch_agent ? `<div style="font-size:12px; margin-bottom:6px; color:#fbbf24;">This daemon is kept alive by ${o.launch_agent}. Stopping it here only works until launchd restarts it.</div>` : ''}
           <div style="display:flex; gap:8px; flex-wrap:wrap; margin:12px 0;">
             <button class="btn btn-primary" onclick="ollamaAction('/api/ollama/start')">${running ? '↻ Refresh' : '▶ Start daemon'}</button>
