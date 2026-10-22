@@ -1,5 +1,5 @@
 
-# ⚡ macOS MLX Control Center `v0.9.0` (MLX Controller Edition)
+# ⚡ macOS MLX Control Center `v0.10.0` (MLX Controller Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -55,6 +55,7 @@ Build it yourself with `./desktop/build_app.sh`; `./desktop/build_app.sh --insta
 
 Most local LLM runners are either overly complex, hog system menubars, or require manual hand-editing of configuration JSON files for coding tools. **macOS MLX Control Center** solves this with:
 
+* 🛡️ **No more silent turns (v0.10.0)**: agent harnesses used to give up on a local model whose server went quiet — `mlx-lm` and `mlx-vlm` write nothing at all while a tool call is being built (one measured turn: **96.8 s** of silence) or during a re-prefill. A built-in stream guard now emits SSE keepalives and a guaranteed `[DONE]` from inside the model server process, so DeepSeek Harness, Pi Coder and friends wait instead of dropping the turn. Port, pid and command line are unchanged.
 * 🖥️ **MLX Controller desktop app (v0.9.0)**: a native window with Start / Stop / Restart / Open Dashboard, live health status, graceful shutdown, port-conflict safety, and no menu-bar icon. Installed to `/Applications` with a Desktop alias; the installer leaves models and the model server on 9999 untouched.
 * 📦 **Serves from your drive (v0.8.5)**: repo-id requests reuse the weights already on the external drive (`HF_HUB_CACHE` is pointed at the library) instead of silently re-downloading into `~/.cache`.
 * 👁️ **Harness Vision Sync (v0.8.9)**: the one-click Harness sync now declares `input: [text, image]` for vision models, so DeepSeek Harness forwards image attachments to `mlx-vlm` instead of rejecting them with *"The current model does not support images"* — DSH treats custom OpenAI-compatible providers as text-only until a model says otherwise.
@@ -196,6 +197,29 @@ The recommended window is `min(native, RAM-safe)` — normally just the native w
 * `Settings → Context Window` is **Auto** by default (per-model native); pick 32K/64K/128K/256K to force a cheaper cap — it is applied as `--max-kv-size` and can never exceed the model's own maximum
 * `./mlx.sh sync-harness` writes `contextWindow`, `maxTokens`, and image modality (`input: [text, image]` for vision models) into the DeepSeek Harness profile, so the harness compresses at the right point instead of assuming 200K and accepts image attachments
 * hand-edited capacity values in the harness profile are preserved across syncs
+
+## 🛡️ Stream Guard: No More “Silent” Turns (New in v0.10.0)
+
+**Symptom:** you chat with a local model through an agent harness (DeepSeek Harness, Pi Coder, any OpenAI-compatible client), the answer stops mid-turn or never starts, and typing “hello” gets it going again.
+
+**Cause:** the model server itself goes quiet — not wrong, just quiet. Both `mlx-lm` and `mlx-vlm` build a whole tool call before writing anything, so during a long tool-call turn (one measured turn took **96.8 s and 3,736 tokens**) the HTTP stream carries **zero bytes**. Prefill is silent too, and without prefix-cache reuse the same conversation is re-prefilled every turn (14 K tokens ≈ 11.6 s on the 288-billion MoE model). A client with an idle watchdog — Pi's is shorter than DeepSeek Harness's 5 minutes — gives up on a stream that has produced nothing, and the turn dies with an empty assistant message. Nothing is logged as an error, because nothing went wrong.
+
+**Fix:** every launch now loads `mlx_stream_guard/stream_guard.py` *inside* the model server process (via `PYTHONPATH` + `sitecustomize`, so the port, pid file, log file and command line are unchanged):
+
+* **SSE keepalives** every 5 s while the server is silent — a real `chat.completion.chunk` with an empty `delta`, so a client watchdog actually resets instead of ignoring a comment
+* **a guaranteed `data: [DONE]`** at the end of every streamed chat completion, even if the server dies before sending one
+* **no behaviour change** on normal turns: an existing `[DONE]` is never duplicated, JSON responses are untouched, and `text/event-stream` detection is done per response
+* **visible** in the dashboard status bar (`🛡️ Stream guard on · N keepalive(s)`), and in `~/.mlx_logs/stream_guard.log` (`keepalives`, `first_byte`, `max_gap`, `synthetic_done` per request)
+
+Kill switch and tuning:
+
+```bash
+MLX_STREAM_GUARD=0 ./mlx.sh start <model>     # launch the old, unguarded way
+MLX_GUARD_KEEPALIVE_SECS=2 ./mlx.sh start ... # heartbeat interval (default 5)
+MLX_GUARD_HEARTBEAT=comment ./mlx.sh start ... # raw SSE comments instead of empty deltas
+```
+
+Tests: `python3 tests/test_stream_guard.py` (no model download, no network).
 
 ## 🔄 Sync Installed Models into DeepSeek Harness (v0.8.4, vision fix in v0.8.9)
 

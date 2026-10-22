@@ -57,6 +57,15 @@ cp "$TARGET_DIR/mlx_helper.py" "$HOME/mlx_helper.py" 2>/dev/null || true
 cp "$TARGET_DIR/mlx.sh" "$HOME/mlx.sh" 2>/dev/null || true
 cp "$TARGET_DIR/mlx_helper.py" "$PID_DIR/mlx_helper.py" 2>/dev/null || true
 
+# The stream guard must live next to each mlx_helper.py copy: mlx_helper puts its
+# own directory + /mlx_stream_guard first on PYTHONPATH when it launches a server.
+for guard_root in "${HOME:?}/" "$PID_DIR/"; do
+    if [ -d "$guard_root/mlx_stream_guard" ]; then
+        rm -rf "$guard_root/mlx_stream_guard"
+    fi
+    cp -R "$TARGET_DIR/mlx_stream_guard" "$guard_root/mlx_stream_guard" 2>/dev/null || true
+done
+
 # 5. Quit the old controller (if any) and stop the GUI gracefully
 quit_controller() {
     if pgrep -x MLXController >/dev/null 2>&1; then

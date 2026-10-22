@@ -437,6 +437,31 @@ if unresponsive:
 "
     fi
     echo "======================================"
+    python3 - "$HELPER_PY" <<'PYCODE' 2>/dev/null || true
+import sys
+sys.path.insert(0, sys.argv[1].rsplit("/", 1)[0])
+try:
+    import mlx_helper as h
+    st = h.stream_guard_status()
+except Exception:
+    raise SystemExit(0)
+if not st.get("available"):
+    print("  🛡️  Stream guard: not installed (mlx_stream_guard/ missing)")
+elif not st.get("enabled"):
+    print("  🛡️  Stream guard: disabled by MLX_STREAM_GUARD=0")
+elif not st.get("active"):
+    print("  🛡️  Stream guard: armed — applies to the next server you start")
+else:
+    bits = []
+    if st.get("keepalives"):
+        bits.append("%d keepalive(s)" % st["keepalives"])
+    if st.get("synthetic_done"):
+        bits.append("%d late [DONE]" % st["synthetic_done"])
+    if st.get("errors"):
+        bits.append("%d error(s)" % st["errors"])
+    print("  🛡️  Stream guard: on · %d stream(s)%s" % (
+        st.get("streams", 0), (" · " + " · ".join(bits)) if bits else ""))
+PYCODE
     echo ""
 }
 
@@ -1128,6 +1153,17 @@ PYCODE
 )
     [ -n "$hub_for_model" ] && export HF_HUB_CACHE="$hub_for_model"
 
+    # The guard is imported by the server process itself (PYTHONPATH + the
+    # sitecustomize hook), so the command line, port, pid and log stay identical.
+    local guard_dir="$SCRIPT_DIR/mlx_stream_guard"
+    if [ -f "$guard_dir/sitecustomize.py" ] && [ "${MLX_STREAM_GUARD:-1}" != "0" ]; then
+        export PYTHONPATH="$guard_dir${PYTHONPATH:+:$PYTHONPATH}"
+        export MLX_STREAM_GUARD=1
+        export MLX_GUARD_KEEPALIVE_SECS="${MLX_GUARD_KEEPALIVE_SECS:-5}"
+        export MLX_GUARD_LOG="${MLX_GUARD_LOG:-$LOG_DIR/stream_guard.log}"
+        export MLX_GUARD_STATE="${MLX_GUARD_STATE:-$PID_DIR/stream_guard.json}"
+    fi
+
     if [ "$is_vis" = "yes" ]; then
         nohup uvx --from mlx-vlm --with jinja2 python -m mlx_vlm.server \
             --model "$model_path" \
@@ -1483,7 +1519,7 @@ main_menu() {
     while true; do
         clear 2>/dev/null || true
         echo "╔════════════════════════════════════════════════════════════╗"
-        echo "║     MLX Model Control Center v0.9.0 (MLX Controller)       ║"
+        echo "║     MLX Model Control Center v0.10.0 (MLX Controller)       ║"
         echo "╚════════════════════════════════════════════════════════════╝"
         show_running_header
         echo "  1. List Downloaded Models (Select # to Launch)"

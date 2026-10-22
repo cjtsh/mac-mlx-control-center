@@ -143,7 +143,8 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             stats = mlx_helper.get_system_stats()
             downloads = mlx_helper.get_active_downloads()
             config = mlx_helper.load_global_settings()
-            self.send_json({"servers": servers, "stats": stats, "downloads": downloads, "config": config})
+            self.send_json({"servers": servers, "stats": stats, "downloads": downloads, "config": config,
+                            "stream_guard": mlx_helper.stream_guard_status()})
         elif path == "/api/config":
             config = mlx_helper.load_global_settings()
             self.send_json(config)
@@ -430,6 +431,10 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             # ~/.cache instead of reusing the copy on the selected drive.
             if launch_hub:
                 env["HF_HUB_CACHE"] = launch_hub
+
+            # Keeps the harness's stream alive through a silent prefill or a long
+            # tool call, and guarantees a terminal `data: [DONE]` event.
+            env = mlx_helper.stream_guard_env(env)
 
             with open(log_file, "a") as lf:
                 proc = subprocess.Popen(cmd, stdout=lf, stderr=lf, env=env)
@@ -793,7 +798,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>macOS MLX Control Center v0.9.0 (MLX Controller)</title>
+  <title>macOS MLX Control Center v0.10.0 (MLX Controller)</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1234,7 +1239,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <div>
         <div class="brand-title" style="display: flex; align-items: center; gap: 8px;">
           macOS MLX Control Center
-          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.9.0 (MLX Controller)</span>
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(99, 102, 241, 0.25); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); font-weight: 600; letter-spacing: 0.5px;">v0.10.0 (MLX Controller)</span>
         </div>
         <div style="font-size: 12px; color: var(--text-muted);">Apple Silicon Local Multimodal & LLM Powerstation</div>
       </div>
@@ -2839,12 +2844,30 @@ INDEX_HTML = """<!DOCTYPE html>
         const statusHeader = document.getElementById('statusHeader');
         const serverContainer = document.getElementById('activeServerContainer');
 
+        // Stream guard health: injects SSE keepalives + a terminal [DONE] inside the
+        // model server process, so a long prefill or tool call no longer looks idle.
+        const guard = data.stream_guard || {};
+        let guardPill = '';
+        if (guard.available) {
+          const guardOn = !!guard.active;
+          const bits = [];
+          if (guard.keepalives) bits.push(guard.keepalives + ' keepalive(s)');
+          if (guard.synthetic_done) bits.push(guard.synthetic_done + ' late [DONE]');
+          if (guard.errors) bits.push(guard.errors + ' error(s)');
+          const detail = bits.length ? ' &middot; ' + bits.join(' &middot; ') : '';
+          guardPill = `
+            <div class="status-pill ${guardOn ? 'ready' : 'none'}" title="Stream guard ${guardOn ? 'active in the last launched server' : 'armed for the next launch'}. Keepalives keep harness clients from timing out during a silent prefill or tool call.">
+              <span class="status-dot ${guardOn ? '' : 'pulse'}"></span> 🛡️ Stream guard ${guardOn ? 'on' : 'armed'}${detail}
+            </div>`;
+        }
+
         if (activeServers.length > 0) {
           const readyCount = activeServers.filter(s => s.status === 'READY').length;
           statusHeader.innerHTML = `
             <div class="status-pill ${readyCount > 0 ? 'ready' : 'none'}">
               <span class="status-dot"></span> ${activeServers.length} Active MLX Server(s) (${readyCount} Ready)
             </div>`;
+          statusHeader.innerHTML += guardPill;
           
           serverContainer.innerHTML = '';
           activeServers.forEach(s => {
@@ -2884,6 +2907,7 @@ INDEX_HTML = """<!DOCTYPE html>
             <div class="status-pill none">
               <span class="status-dot"></span> 0 Active MLX Servers
             </div>`;
+          statusHeader.innerHTML += guardPill;
           serverContainer.innerHTML = `<div class="card" style="grid-column: 1 / -1; width: 100%; text-align: center; color: var(--text-muted); padding: 18px;">No model currently running. Click "Start Model" on any downloaded model below!</div>`;
         }
 

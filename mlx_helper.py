@@ -313,6 +313,71 @@ def get_mlx_env():
         env[k] = v
     return env
 
+STREAM_GUARD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mlx_stream_guard")
+STREAM_GUARD_STATE = os.path.expanduser("~/.mlx_pids/stream_guard.json")
+STREAM_GUARD_LOG = os.path.expanduser("~/.mlx_logs/stream_guard.log")
+
+def stream_guard_env(env=None):
+    """Make the launched model server import `mlx_stream_guard/sitecustomize.py`.
+
+    The guard has to live *inside* the server process: proxying would mean a second
+    port plus a baseURL change in every harness config, and would need its own
+    supervision. Putting this directory first on PYTHONPATH leaves the command line,
+    the port, the pid file and every existing health check untouched — `python -m
+    mlx_vlm.server` simply imports the hook at interpreter start.
+
+    Set MLX_STREAM_GUARD=0 to launch the old, unguarded way.
+    """
+    env = dict(env if env is not None else os.environ)
+    if (os.environ.get("MLX_STREAM_GUARD") or "").strip() == "0":
+        env["MLX_STREAM_GUARD"] = "0"
+        return env
+    if not os.path.exists(os.path.join(STREAM_GUARD_DIR, "sitecustomize.py")):
+        return env
+    previous = env.get("PYTHONPATH", "")
+    parts = [STREAM_GUARD_DIR]
+    parts += [p for p in previous.split(os.pathsep) if p and p != STREAM_GUARD_DIR]
+    env["PYTHONPATH"] = os.pathsep.join(parts)
+    env["MLX_STREAM_GUARD"] = "1"
+    env.setdefault("MLX_GUARD_KEEPALIVE_SECS", "5")
+    env["MLX_GUARD_LOG"] = env.get("MLX_GUARD_LOG") or STREAM_GUARD_LOG
+    env["MLX_GUARD_STATE"] = env.get("MLX_GUARD_STATE") or STREAM_GUARD_STATE
+    return env
+
+def stream_guard_status():
+    """What the guard saw, for the dashboard and for `mlx.sh status`."""
+    enabled = (os.environ.get("MLX_STREAM_GUARD") or "").strip() != "0"
+    available = os.path.exists(os.path.join(STREAM_GUARD_DIR, "sitecustomize.py"))
+    info = {
+        "available": available,
+        "enabled": enabled and available,
+        "state_file": STREAM_GUARD_STATE,
+        "log": STREAM_GUARD_LOG,
+        "active": False,
+    }
+    try:
+        with open(STREAM_GUARD_STATE) as fh:
+            state = json.load(fh)
+    except Exception:
+        return info
+    age = None
+    try:
+        age = max(0.0, time.time() - os.path.getmtime(STREAM_GUARD_STATE))
+    except Exception:
+        pass
+    info["active"] = bool(state.get("installed"))
+    info["streams"] = state.get("streams", 0)
+    info["keepalives"] = state.get("keepalives", 0)
+    info["synthetic_done"] = state.get("synthetic_done", 0)
+    info["empty_streams"] = state.get("empty_streams", 0)
+    info["errors"] = state.get("errors", 0)
+    info["hooks"] = state.get("engine_hooks") or []
+    info["interval"] = state.get("interval")
+    info["mode"] = state.get("mode")
+    info["last"] = state.get("last")
+    info["age_seconds"] = None if age is None else round(age, 1)
+    return info
+
 STORAGE_FILE = os.path.expanduser("~/.mlx_pids/storage.json")
 LIBRARY_DIRNAME = "MLX-Models"
 MIN_DRIVE_GB = 8
