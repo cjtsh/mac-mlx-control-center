@@ -13,6 +13,7 @@ import subprocess
 import re
 import socket
 import threading
+import secrets
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
@@ -68,6 +69,75 @@ FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
 </svg>"""
 
 PORT = 9998
+
+_ollama_import_lock = threading.Lock()
+_ollama_import_job = {"state": "idle"}
+
+
+def ollama_import_status():
+    with _ollama_import_lock:
+        return dict(_ollama_import_job)
+
+
+def start_ollama_import(path, name):
+    global _ollama_import_job
+    if not path.lower().endswith(".gguf") or not os.path.isfile(path):
+        return {"error": "Choose an existing GGUF file"}, 400
+    name = name or mlx_helper.ollama_model_tag(path)
+    if not name or len(name) > 200 or any(c.isspace() for c in name):
+        return {"error": "Choose a valid Ollama model name"}, 400
+    with _ollama_import_lock:
+        if _ollama_import_job.get("state") == "running":
+            return {"error": "An Ollama import is already running", "job": dict(_ollama_import_job)}, 409
+        job_id = secrets.token_hex(12)
+        total = os.path.getsize(path)
+        _ollama_import_job = {"id": job_id, "state": "running", "phase": "checking",
+                              "model": name, "file": os.path.basename(path),
+                              "total_bytes": total, "copied_bytes": 0, "percent": None,
+                              "message": "Checking Ollama for an existing copy…"}
+
+    def update(phase, percent):
+        messages = {"checking": "Checking Ollama for an existing copy…",
+                    "preparing": "Preparing the model…",
+                    "copying": "Copying the GGUF to Ollama…",
+                    "finalizing": "Finishing the Ollama model…"}
+        with _ollama_import_lock:
+            if _ollama_import_job.get("id") != job_id:
+                return
+            _ollama_import_job["phase"] = phase
+            _ollama_import_job["message"] = messages.get(phase, "Importing…")
+            if phase == "copying" and percent is not None:
+                value = max(_ollama_import_job.get("percent") or 0, min(100, percent))
+                _ollama_import_job["percent"] = value
+                _ollama_import_job["copied_bytes"] = round(total * value / 100)
+
+    def work():
+        try:
+            result = mlx_helper.ollama_import(path, name=name, on_progress=update)
+            if result.get("ok"):
+                update("finalizing", None)
+                try:
+                    mlx_helper.sync_ollama_agents()
+                except Exception:
+                    pass
+            with _ollama_import_lock:
+                if _ollama_import_job.get("id") != job_id:
+                    return
+                if result.get("ok"):
+                    _ollama_import_job.update(state="complete", phase="complete", percent=100,
+                                              copied_bytes=total, tag=result.get("tag") or name,
+                                              reused=bool(result.get("reused")),
+                                              message="Already in Ollama" if result.get("reused") else "Import complete. Start the model when ready.")
+                else:
+                    _ollama_import_job.update(state="failed", phase="failed",
+                                              message=result.get("error") or "Ollama import failed")
+        except Exception as exc:
+            with _ollama_import_lock:
+                if _ollama_import_job.get("id") == job_id:
+                    _ollama_import_job.update(state="failed", phase="failed", message=str(exc))
+
+    threading.Thread(target=work, name="ollama-import", daemon=True).start()
+    return ollama_import_status(), 202
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
@@ -160,6 +230,8 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
             self.send_json({"files": mlx_helper.hf_repo_gguf_files(repo_id)})
         elif path == "/api/ollama":
             self.send_json({"ollama": mlx_helper.ollama_status()})
+        elif path == "/api/ollama/import/status":
+            self.send_json(ollama_import_status())
         elif path == "/api/config":
             config = mlx_helper.load_global_settings()
             self.send_json(config)
@@ -556,16 +628,11 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
                 except Exception:
                     found = ""
             self.send_json({"tag": found, "ok": True})
-        elif path == "/api/ollama/import":
+        elif path == "/api/ollama/import/start" or path == "/api/ollama/import":
             gguf = (payload.get("path") or "").strip()
-            name = (payload.get("name") or "").strip() or None
-            result = mlx_helper.ollama_import(gguf, name=name)
-            if result.get("ok"):
-                try:
-                    mlx_helper.sync_ollama_agents()
-                except Exception:
-                    pass
-            self.send_json(result)
+            name = (payload.get("name") or "").strip()
+            result, status_code = start_ollama_import(gguf, name)
+            self.send_json(result, status_code)
         elif path == "/api/ollama/unload":
             tag = (payload.get("model") or payload.get("tag") or "").strip()
             result = mlx_helper.ollama_unload(tag or None)
@@ -993,7 +1060,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
 
 # One source of truth for the release: the title, the badge and the banner all
 # read this, so they can no longer drift apart (v0.11.6 shipped a stale badge).
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 
 INDEX_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -1366,6 +1433,9 @@ INDEX_HTML = """<!DOCTYPE html>
     .btn-danger:hover { background: var(--danger); color: #fff; box-shadow: 0 0 12px var(--danger-glow); }
     .btn-secondary { background: rgba(255, 255, 255, 0.08); color: var(--text); }
     .btn-secondary:hover { background: rgba(255, 255, 255, 0.15); }
+    .btn:disabled { opacity: 0.55; cursor: not-allowed; box-shadow: none; }
+    .import-status-panel { position: fixed; top: 18px; right: 18px; z-index: 10020; width: min(420px, calc(100vw - 36px)); padding: 16px; border-radius: 12px; background: #151c2c; border: 1px solid #6366f1; box-shadow: 0 16px 40px #0009; }
+    .import-status-panel progress { display: block; width: 100%; height: 14px; margin: 12px 0 6px; accent-color: #34d399; }
     
     /* FEATURE CHIPS & SEARCH FILTER BAR */
     .filter-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
@@ -1772,6 +1842,16 @@ INDEX_HTML = """<!DOCTYPE html>
   </div>
 
   <!-- FLOATING STICKY AI COMPARISON BAR -->
+  <div id="ollamaImportStatus" class="import-status-panel" role="status" aria-live="polite" style="display: none;">
+    <div style="display:flex;justify-content:space-between;gap:12px;align-items:start;">
+      <strong id="ollamaImportTitle">Importing GGUF</strong>
+      <button id="ollamaImportDismiss" class="btn btn-secondary" style="padding:2px 8px;" onclick="dismissOllamaImportStatus()" aria-label="Dismiss import status">✕</button>
+    </div>
+    <div id="ollamaImportMessage" style="font-size:13px;color:var(--text-muted);margin-top:6px;"></div>
+    <progress id="ollamaImportProgress" max="100"></progress>
+    <div id="ollamaImportAmount" style="font-size:12px;color:var(--text-muted);"></div>
+  </div>
+
   <div id="floatingCompareBar" class="compare-bar" style="display: none;">
     <div style="font-size: 13px; font-weight: 600; color: #fff;">
       <span id="compareCountLabel">Selected Models (0):</span>
@@ -3433,7 +3513,7 @@ INDEX_HTML = """<!DOCTYPE html>
           ? `<button class="btn ${ollamaLoaded ? 'btn-secondary' : 'btn-primary'}" onclick='runOllamaModel(${JSON.stringify(ollamaTag)})'>${ollamaLoaded ? '✓ Loaded' : '🚀 Start Model'}</button>
              <button class="btn btn-secondary" onclick="openOllamaModal()">🦙 Manage</button>`
           : (m.engine === 'ollama' || /\\.gguf$/i.test(m.name)
-              ? `<button class="btn btn-primary" onclick='importGguf(${JSON.stringify(m.gguf_path || m.path || '')}, ${JSON.stringify(m.name)})'>🦙 Import to Ollama</button>`
+              ? `<button class="btn btn-primary" ${ollamaImportActive ? 'disabled title="An import is already running"' : ''} onclick='importGguf(${JSON.stringify(m.gguf_path || m.path || '')}, ${JSON.stringify(m.name)})'>🦙 Import to Ollama</button>`
               : `<button class="btn ${isRunning ? 'btn-secondary' : 'btn-primary'}" onclick="openLaunchModal('${m.name}')">${isRunning ? `✓ Active on Port ${runningServer.port}` : '🚀 Start Model'}</button>`);
 
         const fastSwapCard = `
@@ -3635,52 +3715,81 @@ INDEX_HTML = """<!DOCTYPE html>
       await loadModels();
     }
 
+    let ollamaImportActive = false;
+    let ollamaImportLastState = 'idle';
+    let ollamaImportLastId = '';
+    let ollamaImportDismissedId = '';
+    let ollamaImportPolling = false;
+
+    function dismissOllamaImportStatus() {
+      if (ollamaImportActive) return;
+      ollamaImportDismissedId = ollamaImportLastId;
+      document.getElementById('ollamaImportStatus').style.display = 'none';
+    }
+
+    async function pollOllamaImport() {
+      if (ollamaImportPolling) return;
+      ollamaImportPolling = true;
+      try {
+        const res = await fetch('/api/ollama/import/status', { cache: 'no-store' });
+        const job = await res.json();
+        const wasActive = ollamaImportActive;
+        const previousState = ollamaImportLastState;
+        ollamaImportActive = job.state === 'running';
+        ollamaImportLastState = job.state || 'idle';
+        if (job.id && job.id !== ollamaImportLastId) {
+          ollamaImportLastId = job.id;
+          ollamaImportDismissedId = '';
+        }
+        if (wasActive !== ollamaImportActive) renderModelGrids();
+        const panel = document.getElementById('ollamaImportStatus');
+        if (!job.id || (job.id === ollamaImportDismissedId && !ollamaImportActive)) {
+          panel.style.display = 'none';
+          return;
+        }
+        panel.style.display = 'block';
+        document.getElementById('ollamaImportDismiss').disabled = ollamaImportActive;
+        document.getElementById('ollamaImportTitle').textContent = job.state === 'complete' ? 'GGUF import complete' : job.state === 'failed' ? 'GGUF import failed' : 'Importing ' + (job.model || 'GGUF');
+        document.getElementById('ollamaImportMessage').textContent = job.message || '';
+        const progress = document.getElementById('ollamaImportProgress');
+        if (job.percent == null) progress.removeAttribute('value');
+        else progress.value = job.state === 'complete' ? 100 : Math.min(99, job.percent);
+        const gb = bytes => (Number(bytes || 0) / (1024 ** 3)).toFixed(1);
+        document.getElementById('ollamaImportAmount').textContent = job.state === 'complete'
+          ? `Ollama model: ${job.tag}. Use Start Model when ready.`
+          : job.state === 'failed'
+            ? 'The original downloaded file is unchanged.'
+            : job.percent == null
+              ? `${gb(job.total_bytes)} GB file · ${job.phase || 'preparing'}`
+              : `${gb(job.copied_bytes)} of ${gb(job.total_bytes)} GB copied · ${Math.round(job.percent)}%`;
+        if (previousState === 'running' && job.state === 'complete') loadModels();
+      } catch (e) {
+        console.warn('Could not read Ollama import status', e);
+      } finally {
+        ollamaImportPolling = false;
+      }
+    }
+
     async function importGguf(path, name) {
       if (!path) { alert('No local file path for this model.'); return; }
+      if (ollamaImportActive) { await pollOllamaImport(); return; }
       const base = (name || path.split('/').pop()).replace(/\\.gguf$/i, '');
       const suggested = base.toLowerCase().replace(/[^a-z0-9._:-]+/g, '-').replace(/^-+|-+$/g, '');
-      // Ask Ollama whether it already holds this exact file before offering a copy.
-      let existing = '';
-      try {
-        const check = await fetch('/api/ollama/tag_for?path=' + encodeURIComponent(path));
-        const cd = await check.json();
-        existing = cd.tag || '';
-      } catch (e) { /* offline check is best-effort */ }
-      if (existing) {
-        alert('This file is already in Ollama as "' + existing + '".\\n\\nNothing to do — use that model directly.');
-        openOllamaModal();
-        return;
-      }
       const tag = prompt(
         'Ollama keeps its own copy of every model, so importing copies this file into the store.\\n' +
-        'The downloaded file can be deleted afterwards to get the space back.\\n\\n' +
+          'The downloaded file remains in place. Import does not start the model.\\n\\n' +
         'Name it in Ollama (a tag like qwen2.5-coder:14b-q4):', suggested);
       if (!tag) return;
       try {
-        const res = await fetch('/api/ollama/import', {
+        const res = await fetch('/api/ollama/import/start', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ path: path, name: tag })
         });
         const d = await res.json();
-        if (!d.ok) { alert('Import failed: ' + (d.error || 'unknown error')); return; }
-        const shown = d.tag || tag;
-        if (d.reused) {
-          alert('Already in Ollama as "' + shown + '". No second copy was made.');
-        } else {
-          const dir = path.substring(0, path.lastIndexOf('/'));
-          if (confirm('Imported "' + shown + '" into the Ollama store.\\n\\n' +
-                      'Delete the downloaded file now to reclaim the space?\\n' +
-                      '(Ollama has its own copy, so the model keeps working.)')) {
-            await fetch('/api/delete', {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ delete_target: dir })
-            });
-          }
-        }
-        openOllamaModal();
-        loadModels();
+        if (!res.ok) { alert(d.error || 'Could not start import'); await pollOllamaImport(); return; }
+        await pollOllamaImport();
       } catch (e) {
-        alert('Import failed: ' + e);
+        alert('Could not start import: ' + e);
       }
     }
 
@@ -4411,6 +4520,8 @@ INDEX_HTML = """<!DOCTYPE html>
     setInterval(updateStatus, 3000);
     updateStatus();
     loadModels();
+    pollOllamaImport();
+    setInterval(pollOllamaImport, 1500);
     loadDrives();
     setInterval(loadDrives, 30000);
     loadHfAuth();

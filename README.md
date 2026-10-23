@@ -1,5 +1,5 @@
 
-# ⚡ macOS LLM Control Center `v1.0.8` (MLX + Ollama Edition)
+# ⚡ macOS LLM Control Center `v1.0.9` (MLX + Ollama Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -540,6 +540,10 @@ Two changes make that impossible:
 
 Startup is back to milliseconds, and a slow disk can only delay a backup exclusion, never
 the UI.
+
+### GGUF import progress (v1.0.9)
+
+Importing a downloaded GGUF into Ollama now starts a background job and shows live copy progress on the dashboard. The browser stays responsive, and repeat clicks cannot launch another import while one is active. The previous three-minute import timeout is removed. Import only places the model in Ollama's library; **Start Model** remains a separate action. The original download stays on disk until you choose to delete it. `POST /api/ollama/import` now returns a job immediately; `GET /api/ollama/import/status` reports its progress and result.
 
 ### Deleting a model, from either store (v1.0.8)
 

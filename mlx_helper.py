@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, json, hashlib, fnmatch, tempfile, hashlib, signal, shlex, subprocess, re, shutil, urllib.request, urllib.parse, urllib.error, socket, time, threading
+import os, sys, json, hashlib, fnmatch, tempfile, hashlib, signal, shlex, subprocess, re, shutil, urllib.request, urllib.parse, urllib.error, socket, time, threading, select
 
 _REPO_SIZE_CACHE = {}
 _SPEED_CACHE = {}
@@ -1105,7 +1105,61 @@ def gguf_projector_for(gguf_path):
         pass
     return ""
 
-def ollama_import(gguf_path, name=None, port=None, wait_seconds=180):
+def _ollama_create_with_progress(exe, tag, modelfile_path, env, wait_seconds=None, on_progress=None):
+    """Read Ollama's carriage-return progress while it copies a local GGUF."""
+    proc = subprocess.Popen([exe, "create", tag, "-f", modelfile_path],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            env=env, bufsize=0)
+    output_tail = ""
+    pending = ""
+    started = time.monotonic()
+
+    def report(line):
+        nonlocal output_tail
+        line = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line).strip()
+        if not line:
+            return
+        output_tail = (output_tail + line + "\n")[-4000:]
+        if not on_progress:
+            return
+        lower = line.lower()
+        if "copying file" in lower:
+            match = re.search(r"(\d+(?:\.\d+)?)\s*%", line)
+            on_progress("copying", float(match.group(1)) if match else None)
+        elif "writing manifest" in lower or "creating" in lower:
+            on_progress("finalizing", None)
+        elif "gathering model" in lower or "reading model" in lower:
+            on_progress("preparing", None)
+
+    try:
+        while True:
+            readable, _, _ = select.select([proc.stdout], [], [], 1)
+            if readable:
+                chunk = os.read(proc.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                pending += chunk.decode("utf-8", errors="replace")
+                parts = re.split(r"[\r\n]", pending)
+                pending = parts.pop()
+                for line in parts:
+                    report(line)
+                if len(pending) > 8192:
+                    report(pending)
+                    pending = ""
+            if wait_seconds is not None and time.monotonic() - started > wait_seconds:
+                proc.terminate()
+                raise subprocess.TimeoutExpired(proc.args, wait_seconds)
+        if pending:
+            report(pending)
+        return proc.wait(), output_tail
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        proc.stdout.close()
+
+
+def ollama_import(gguf_path, name=None, port=None, wait_seconds=None, on_progress=None):
     """Create an Ollama model from a local GGUF file.
 
     Ollama copies the file into its blob store (deduplicated by digest), so this
@@ -1119,12 +1173,13 @@ def ollama_import(gguf_path, name=None, port=None, wait_seconds=180):
         return {"ok": False, "error": f"no such file: {gguf_path}"}
     cfg = ollama_settings()
     tag = name or ollama_model_tag(gguf_path)
-    if not name:
-        existing = ollama_tag_for_gguf(gguf_path, port=port)
-        if existing:
-            return {"ok": True, "tag": existing, "reused": True,
-                    "message": f"Already in Ollama as {existing}",
-                    "output": ""}
+    if on_progress:
+        on_progress("checking", None)
+    existing = ollama_tag_for_gguf(gguf_path, port=port)
+    if existing:
+        return {"ok": True, "tag": existing, "reused": True,
+                "message": f"Already in Ollama as {existing}",
+                "output": ""}
     # Vision GGUF repos keep the multimodal projector in a second file; Ollama
     # needs both FROM lines or the model comes up text-only.
     projector = gguf_projector_for(gguf_path)
@@ -1143,14 +1198,15 @@ def ollama_import(gguf_path, name=None, port=None, wait_seconds=180):
     try:
         with open(modelfile_path, "w") as fh:
             fh.write(modelfile)
-        out = subprocess.run([exe, "create", tag, "-f", modelfile_path], text=True,
-                             capture_output=True, env=env, timeout=wait_seconds)
+        returncode, output = _ollama_create_with_progress(
+            exe, tag, modelfile_path, env, wait_seconds=wait_seconds,
+            on_progress=on_progress)
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
-    if out.returncode != 0:
-        return {"ok": False, "error": (out.stderr or out.stdout or "ollama create failed").strip()[:400]}
+    if returncode != 0:
+        return {"ok": False, "error": (output or "ollama create failed").strip()[-400:]}
 
     # No template in the GGUF? Put the family's real chat template back, or the
     # model answers as a raw completion and no harness can call tools on it.
@@ -1180,7 +1236,7 @@ def ollama_import(gguf_path, name=None, port=None, wait_seconds=180):
 
     return {"ok": True, "tag": tag, "message": f"Imported as {tag}",
             "template_fixed": template_fixed,
-            "output": (out.stdout or "").strip()[-400:]}
+            "output": output.strip()[-400:]}
 
 GGUF_DIGEST_CACHE = os.path.join(os.path.expanduser("~/.mlx_pids"), "gguf_digests.json")
 
