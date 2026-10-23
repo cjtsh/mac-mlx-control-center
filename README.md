@@ -1,5 +1,5 @@
 
-# ⚡ macOS LLM Control Center `v1.0.9` (MLX + Ollama Edition)
+# ⚡ macOS LLM Control Center `v1.0.10` (MLX + Ollama Edition)
 
 > **The simplest, fastest 1-click Web GUI & CLI Control Center to search, download, compare, benchmark, and run local Multimodal Vision & Text LLMs on Apple Silicon M-Series processors.**
 
@@ -540,6 +540,10 @@ Two changes make that impossible:
 
 Startup is back to milliseconds, and a slow disk can only delay a backup exclusion, never
 the UI.
+
+### GGUF import notice dismissal (v1.0.10)
+
+Closing a completed or failed GGUF import notice now keeps it closed across dashboard refreshes. A new import has a new job ID and shows its own progress and result.
 
 ### GGUF import progress (v1.0.9)
 

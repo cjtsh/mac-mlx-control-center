@@ -1060,7 +1060,7 @@ class MLXGuiHandler(BaseHTTPRequestHandler):
 
 # One source of truth for the release: the title, the badge and the banner all
 # read this, so they can no longer drift apart (v0.11.6 shipped a stale badge).
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.0.10"
 
 INDEX_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -3718,12 +3718,15 @@ INDEX_HTML = """<!DOCTYPE html>
     let ollamaImportActive = false;
     let ollamaImportLastState = 'idle';
     let ollamaImportLastId = '';
+    const ollamaImportDismissKey = 'ollama-import-dismissed-id';
     let ollamaImportDismissedId = '';
+    try { ollamaImportDismissedId = localStorage.getItem(ollamaImportDismissKey) || ''; } catch (_) {}
     let ollamaImportPolling = false;
 
     function dismissOllamaImportStatus() {
       if (ollamaImportActive) return;
       ollamaImportDismissedId = ollamaImportLastId;
+      try { localStorage.setItem(ollamaImportDismissKey, ollamaImportDismissedId); } catch (_) {}
       document.getElementById('ollamaImportStatus').style.display = 'none';
     }
 
@@ -3739,7 +3742,6 @@ INDEX_HTML = """<!DOCTYPE html>
         ollamaImportLastState = job.state || 'idle';
         if (job.id && job.id !== ollamaImportLastId) {
           ollamaImportLastId = job.id;
-          ollamaImportDismissedId = '';
         }
         if (wasActive !== ollamaImportActive) renderModelGrids();
         const panel = document.getElementById('ollamaImportStatus');
